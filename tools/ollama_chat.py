@@ -16,6 +16,34 @@ HISTORY_FILE = ".ollama_chat_history"
 LOCK_FILE = ".ollama_chat_lock"
 ATTACHMENT_BUFFER: List[Dict] = []
 
+# Optional rich-based Markdown renderer for prettier terminal output
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    _RICH_CONSOLE = Console()
+except Exception:
+    _RICH_CONSOLE = None
+
+# When True, we're resuming an existing conversation and should
+# avoid printing the startup banner.
+CONTINUE_SESSION = False
+
+
+def render_markdown_to_terminal(text: str, console: Console = None) -> None:
+    """Render Markdown `text` to the terminal using Rich if available,
+    otherwise fall back to plain printing.
+    """
+    if console is None:
+        console = _RICH_CONSOLE
+    if console:
+        try:
+            console.print(Markdown(text))
+            return
+        except Exception:
+            pass
+    # Fallback
+    print(text)
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -137,9 +165,19 @@ def load_context() -> List[Dict]:
             print("=" * 60)
             for msg in messages:
                 role = ">>>" if msg["role"] == "user" else "<<<"
-                print(f"{role}: {msg['content']}\n")
+                # Print role header then render the message content using Rich
+                print(f"{role}:")
+                try:
+                    render_markdown_to_terminal(msg.get('content', ''))
+                except Exception:
+                    # Fallback to plain printing if rendering fails
+                    print(msg.get('content', ''))
+                print("\n")
             print("=" * 60)
-            print("Continuing conversation...\n")
+            # Mark that we are continuing a session so callers can
+            # suppress redundant startup output (banner, help, etc.)
+            global CONTINUE_SESSION
+            CONTINUE_SESSION = True
         return messages
     except Exception as e:
         print(f"⚠️ Could not load context: {e}")
@@ -299,16 +337,18 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool):
         prompt_continuation=lambda width, line_number, wrap_count: '... ',
     )
 
-    print(f"🤖 Chat with **{model}** started")
-    print("Available commands:")
-    print(" /exit, /quit, /bye → Save and exit")
-    print(" /reset → Clear all context")
-    print(" /compact → Summarize and shorten history")
-    print(" /model [name] → Switch model (no name lists available models)")
-    print(" /file <filename> → Add file to next message")
-    print(" /clearfiles → Clear attachment buffer")
-    print(" /status → View session information")
-    print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
+    # Only show startup banner/help when NOT resuming an existing session
+    if not CONTINUE_SESSION:
+        print(f"🤖 Chat with **{model}** started")
+        print("Available commands:")
+        print(" /exit, /quit, /bye → Save and exit")
+        print(" /reset → Clear all context")
+        print(" /compact → Summarize and shorten history")
+        print(" /model [name] → Switch model (no name lists available models)")
+        print(" /file <filename> → Add file to next message")
+        print(" /clearfiles → Clear attachment buffer")
+        print(" /status → View session information")
+        print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
 
     while True:
         try:
@@ -319,6 +359,18 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool):
             # Handle commands
             parts = user_input.split(maxsplit=1)
             cmd = parts[0].lower()
+
+            # If input starts with '/' but doesn't match a known command,
+            # treat it as a typo and do not forward to the model.
+            known_cmds = {
+                '/exit', '/quit', '/bye',
+                '/reset', '/compact', '/model',
+                '/file', '/clearfiles', '/status', '/?', '/help'
+            }
+            if cmd.startswith('/') and cmd not in known_cmds:
+                print(f"⚠️ Unknown command '{cmd}'. Messages starting with '/' are commands — not sent."
+                      " If you meant to send a message starting with '/', escape or remove the leading '/'.")
+                continue
 
             if cmd in ['/exit', '/quit', '/bye']:
                 saved_count = save_context(messages)
@@ -380,6 +432,20 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool):
                     ATTACHMENT_BUFFER.append(content)
                     filename = os.path.basename(filepath)
                     print(f"✅ Added to attachments: {filename} ({len(content)} characters)")
+                continue
+
+            elif cmd in ['/?', '/help']:
+                # Show available commands/help
+                print("Available commands:")
+                print(" /exit, /quit, /bye → Save and exit")
+                print(" /reset → Clear all context")
+                print(" /compact → Summarize and shorten history")
+                print(" /model [name] → Switch model (no name lists available models)")
+                print(" /file <filename> → Add file to next message")
+                print(" /clearfiles → Clear attachment buffer")
+                print(" /status → View session information")
+                print(" /? or /help → Show this help text")
+                print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
                 continue
 
             elif cmd == '/clearfiles':
@@ -444,18 +510,15 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool):
                                 delta = chunk["choices"][0].get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
-                                    print(content, end="", flush=True)
                                     full_response += content
                             # Fallback: server responded in native Ollama format despite -o
                             elif "message" in chunk and "content" in chunk["message"]:
                                 content = chunk["message"]["content"]
-                                print(content, end="", flush=True)
                                 full_response += content
                         else:
                             chunk = json.loads(raw)
                             if "message" in chunk and "content" in chunk["message"]:
                                 content = chunk["message"]["content"]
-                                print(content, end="", flush=True)
                                 full_response += content
                     except json.JSONDecodeError:
                         continue
@@ -463,6 +526,11 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool):
             print()
             if full_response:
                 messages.append({"role": "assistant", "content": full_response})
+                # Render nicely if Rich is available
+                try:
+                    render_markdown_to_terminal(full_response)
+                except Exception:
+                    print(full_response)
 
         except requests.exceptions.ConnectionError:
             print(f"\n❌ Could not connect to server at {base_url}. Is it running?")
@@ -485,6 +553,7 @@ def main():
     parser.add_argument("-o", "--openai", action="store_true", help="Use OpenAI compatible API endpoint")
     parser.add_argument("-H", "--host", default="localhost", help="Hostname or IP address of the Ollama server (default: localhost)")
     parser.add_argument("-P", "--port", default="11434", help="Port of the Ollama server (default: 11434)")
+    parser.add_argument("-c", "--clean", action="store_true", help="Start with empty context (overwrites old context on exit)")
     args = parser.parse_args()
 
     # Construct base URL
@@ -506,6 +575,26 @@ def main():
         except Exception:
             # some signals may not be available on all platforms
             pass
+
+    # If requested, start with a clean context (delete existing context file).
+    if getattr(args, "clean", False):
+        try:
+            if os.path.exists(CONTEXT_FILE):
+                os.remove(CONTEXT_FILE)
+                print(f"🧹 Starting with a clean context (removed {CONTEXT_FILE}).")
+            else:
+                print("🧹 Starting with a clean context (no existing context file).")
+        except Exception as e:
+            print(f"⚠️ Could not remove context file: {e}")
+        # Also remove history file when clean flag is used
+        try:
+            if os.path.exists(HISTORY_FILE):
+                os.remove(HISTORY_FILE)
+                print(f"🧹 Removed history file: {HISTORY_FILE}")
+            else:
+                print("🧹 No history file to remove.")
+        except Exception as e:
+            print(f"⚠️ Could not remove history file: {e}")
 
     chat_with_ollama(args.model, base_url, args.openai)
 

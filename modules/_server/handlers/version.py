@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 OLLAMA_VERSION = "0.6.5"
 
 
 async def version_handler(request: Request) -> JSONResponse:
     return JSONResponse({"version": OLLAMA_VERSION})
+
+
+async def root_handler(request: Request) -> PlainTextResponse:
+    return PlainTextResponse("Ollama is running")

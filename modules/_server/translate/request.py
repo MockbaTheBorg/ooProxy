@@ -84,7 +84,7 @@ def chat_to_openai(body: dict) -> dict:
         if body["stream"]:
             out["stream_options"] = {"include_usage": True}
     if "options" in body:
-        opts = body["options"]
+        opts = body.get("options") or {}
         if "temperature" in opts:
             out["temperature"] = opts["temperature"]
         if "top_p" in opts:
@@ -120,7 +120,7 @@ def generate_to_openai(body: dict) -> dict:
         if body["stream"]:
             out["stream_options"] = {"include_usage": True}
     if "options" in body:
-        opts = body["options"]
+        opts = body.get("options") or {}
         if "temperature" in opts:
             out["temperature"] = opts["temperature"]
         if "top_p" in opts:

@@ -58,6 +58,13 @@ python ooproxy.py --serve \
     --key nvapi-YOUR_KEY_HERE
 ```
 
+Or store the remote key once and let ooProxy resolve it from the remote URL host:
+
+```bash
+python tools/ollama_keys.py --host integrate.api.nvidia.com --key nvapi-YOUR_KEY_HERE
+python ooproxy.py --serve --url https://integrate.api.nvidia.com/v1
+```
+
 Or using environment variables:
 
 ```bash
@@ -76,6 +83,8 @@ The proxy starts on `http://127.0.0.1:11434` by default.
 | `--key KEY` | `OPENAI_API_KEY` | _(none)_ | API key for the remote backend |
 | `--port PORT` | — | `11434` | Local port to listen on |
 
+If `--key` and `OPENAI_API_KEY` are both omitted, ooProxy looks up a stored key in `~/.ooProxy/keys.json` using the host portion of the remote URL.
+
 ---
 
 ### List available models
@@ -85,6 +94,23 @@ python ooproxy.py --list \
     --url https://integrate.api.nvidia.com/v1 \
     --key nvapi-YOUR_KEY_HERE
 ```
+
+Stored keys are also used by `--list`, so this works after the `ollama_keys.py` step above:
+
+```bash
+python ooproxy.py --list --url https://integrate.api.nvidia.com/v1
+```
+
+### Manage stored API keys
+
+```bash
+python tools/ollama_keys.py --host integrate.api.nvidia.com --key nvapi-YOUR_KEY_HERE
+python tools/ollama_keys.py --host integrate.api.nvidia.com
+python tools/ollama_keys.py
+python tools/ollama_keys.py --host integrate.api.nvidia.com --delete
+```
+
+Keys are stored in `~/.ooProxy/keys.json`. The value is only weakly obfuscated using the endpoint string itself, so this avoids casual shoulder-surfing rather than providing strong cryptographic protection.
 
 Output:
 

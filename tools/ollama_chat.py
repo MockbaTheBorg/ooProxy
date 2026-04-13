@@ -582,6 +582,52 @@ def _tool_run_shell(command: str, cwd: Optional[str] = None, timeout: int = DEFA
     })
 
 
+def _execute_chat_shell_command(command: str) -> int:
+    raw = command.strip()
+    if not raw:
+        print("Usage: !<shell command>")
+        return 1
+
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        print(f"❌ Shell parse error: {exc}")
+        return 1
+
+    if parts and parts[0] == "cd":
+        if len(parts) > 2:
+            print("Usage: !cd <path>")
+            return 1
+        target = os.path.expanduser(parts[1]) if len(parts) == 2 else os.path.expanduser("~")
+        try:
+            os.chdir(target)
+        except Exception as exc:
+            print(f"❌ cd failed: {exc}")
+            return 1
+        print(f"📂 Current directory: {os.getcwd()}")
+        return 0
+
+    try:
+        result = subprocess.run(
+            raw,
+            shell=True,
+            cwd=os.getcwd(),
+            text=True,
+            capture_output=True,
+        )
+    except Exception as exc:
+        print(f"❌ Command failed to start: {exc}")
+        return 1
+
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+    if result.returncode != 0:
+        print(f"⚠️ Exit code: {result.returncode}")
+    return result.returncode
+
+
 ToolHandler = Callable[..., str]
 
 
@@ -1789,6 +1835,7 @@ def _command_help_markdown(render_mode: str | None = None, guardrails_mode: str 
         "| /compact | Summarize and shorten history |",
         "| /model [name] | Switch model; with no name, list available models |",
         "| /render [mode] | View or switch render mode (`markdown`, `stream`, `hybrid`) |",
+        "| !<cmd> | Run a local shell command (`!cd` changes the chat working directory) |",
         "| /file <filename> | Add file to the next message |",
         "| /clearfiles | Clear attachment buffer |",
         "| /tools | List available local tools |",
@@ -1873,6 +1920,10 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
         try:
             user_input = session.prompt(">>> ").strip()
             if not user_input:
+                continue
+
+            if user_input.startswith("!"):
+                _execute_chat_shell_command(user_input[1:])
                 continue
 
             # Handle commands

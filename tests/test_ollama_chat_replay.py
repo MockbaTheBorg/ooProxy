@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import call
 from unittest.mock import patch
 
@@ -194,6 +196,50 @@ class OllamaChatReplayTests(unittest.TestCase):
         self.assertIs(result, messages)
         self.assertEqual(stdout.getvalue(), "\033c")
         replay_conversation.assert_called_once_with(messages)
+
+    def test_execute_chat_shell_command_cd_changes_working_directory(self) -> None:
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                with patch("sys.stdout", new_callable=StringIO) as stdout:
+                    rc = ollama_chat._execute_chat_shell_command(f"cd {tmpdir}")
+                self.assertEqual(rc, 0)
+                self.assertEqual(os.getcwd(), tmpdir)
+                self.assertIn(f"📂 Current directory: {tmpdir}", stdout.getvalue())
+            finally:
+                os.chdir(original_cwd)
+
+    def test_chat_shell_command_runs_locally_without_calling_model(self) -> None:
+        class FakePromptSession:
+            def __init__(self, responses: list[str]) -> None:
+                self._responses = iter(responses)
+
+            def prompt(self, _prompt: str) -> str:
+                return next(self._responses)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ollama_chat.HISTORY_FILE = f"{tmpdir}/history"
+            ollama_chat.CURRENT_SESSION_ID = "session-shell"
+            ollama_chat.CONTINUE_SESSION = False
+
+            with patch("tools.ollama_chat.load_context", return_value=[]), \
+                 patch("tools.ollama_chat.save_context", return_value=0), \
+                 patch("tools.ollama_chat.PromptSession", return_value=FakePromptSession(["!printf hi", "/exit"])), \
+                 patch("tools.ollama_chat.subprocess.run", return_value=SimpleNamespace(stdout="hi", stderr="", returncode=0)) as subprocess_run, \
+                 patch("tools.ollama_chat._stream_chat_response") as stream_response, \
+                 patch("sys.stdout", new_callable=StringIO) as stdout:
+                ollama_chat.chat_with_ollama(
+                    "llama3.2",
+                    "http://localhost:11434",
+                    use_openai=False,
+                    enable_tools=True,
+                    render_mode="hybrid",
+                    guardrails_mode="confirm-destructive",
+                )
+
+        subprocess_run.assert_called_once()
+        stream_response.assert_not_called()
+        self.assertIn("hi", stdout.getvalue())
 
     def test_markdown_renderer_trims_rich_padding_lines(self) -> None:
         buffer = StringIO()

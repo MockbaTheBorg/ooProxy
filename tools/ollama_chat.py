@@ -35,6 +35,8 @@ DEFAULT_MAX_TOKENS = 32768
 EXTERNAL_TOOL_FILES: List[str] = []
 DEFAULT_RENDER_MODE = "markdown"
 DEFAULT_GUARDRAILS_MODE = "confirm-destructive"
+TOOL_LOAD_EVENTS: List[Dict[str, str]] = []
+TOOL_LOAD_SUMMARY_SHOWN = False
 
 # Optional rich-based Markdown renderer for prettier terminal output
 try:
@@ -346,6 +348,35 @@ def _tool_run_shell(command: str, cwd: Optional[str] = None, timeout: int = DEFA
 ToolHandler = Callable[..., str]
 
 
+def _dedupe_preserve_order(paths: List[str]) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for path in paths:
+        target = os.path.abspath(path)
+        if target in seen:
+            continue
+        seen.add(target)
+        ordered.append(target)
+    return ordered
+
+
+def _tool_directory_files(directory: Path) -> List[str]:
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return [str(path.resolve()) for path in sorted(directory.glob("*.json")) if path.is_file()]
+
+
+def discover_tool_definition_files(tool_files: Optional[List[str]] = None) -> List[str]:
+    global_dir = Path.home() / ".ooProxy" / "tools"
+    local_dir = Path(os.getcwd()) / ".ooProxy" / "tools"
+    ordered_files = [
+        *_tool_directory_files(global_dir),
+        *_tool_directory_files(local_dir),
+        *[os.path.abspath(path) for path in (tool_files or [])],
+    ]
+    return _dedupe_preserve_order(ordered_files)
+
+
 def _build_tool_registry() -> Dict[str, Dict[str, Any]]:
     return {
         "get_current_directory": {
@@ -528,8 +559,8 @@ def _normalize_external_tool_definition(raw_tool: Dict[str, Any], tool_file: str
     return {"name": name, "spec": spec}
 
 
-def _load_external_tools(tool_files: List[str]) -> Dict[str, Dict[str, Any]]:
-    loaded: Dict[str, Dict[str, Any]] = {}
+def _load_external_tools(tool_files: List[str]) -> List[Dict[str, Any]]:
+    loaded: List[Dict[str, Any]] = []
     for tool_file in tool_files:
         target = os.path.abspath(tool_file)
         with open(target, "r", encoding="utf-8") as handle:
@@ -548,10 +579,11 @@ def _load_external_tools(tool_files: List[str]) -> Dict[str, Dict[str, Any]]:
             if not isinstance(raw_tool, dict):
                 raise ValueError(f"Tool file {target} contains a non-object tool entry.")
             normalized = _normalize_external_tool_definition(raw_tool, target)
-            name = normalized["name"]
-            if name in loaded:
-                raise ValueError(f"Duplicate external tool name: {name}")
-            loaded[name] = normalized["spec"]
+            loaded.append({
+                "name": normalized["name"],
+                "spec": normalized["spec"],
+                "file": target,
+            })
 
     return loaded
 
@@ -577,19 +609,45 @@ TOOL_SCHEMAS = _build_tool_schemas()
 
 
 def configure_tool_registry(tool_files: Optional[List[str]] = None) -> None:
-    global TOOL_REGISTRY, TOOL_SCHEMAS, EXTERNAL_TOOL_FILES
+    global TOOL_REGISTRY, TOOL_SCHEMAS, EXTERNAL_TOOL_FILES, TOOL_LOAD_EVENTS, TOOL_LOAD_SUMMARY_SHOWN
 
     registry = _build_tool_registry()
-    resolved_files = [os.path.abspath(path) for path in (tool_files or [])]
-    external_tools = _load_external_tools(resolved_files) if resolved_files else {}
-    for name, spec in external_tools.items():
-        if name in registry:
-            raise ValueError(f"Tool name collision: {name}")
+    load_events: List[Dict[str, str]] = []
+    resolved_files = discover_tool_definition_files(tool_files)
+    external_tools = _load_external_tools(resolved_files) if resolved_files else []
+    for entry in external_tools:
+        name = entry["name"]
+        spec = entry["spec"]
+        previous = registry.get(name)
         registry[name] = spec
+        load_events.append({
+            "name": name,
+            "source": _tool_display_source(spec),
+            "status": "override" if previous else "add",
+            "previous_source": _tool_display_source(previous) if previous else "",
+        })
 
     TOOL_REGISTRY = registry
     TOOL_SCHEMAS = _build_tool_schemas()
     EXTERNAL_TOOL_FILES = resolved_files
+    TOOL_LOAD_EVENTS = load_events
+    TOOL_LOAD_SUMMARY_SHOWN = False
+
+
+def _print_tool_load_summary() -> None:
+    global TOOL_LOAD_SUMMARY_SHOWN
+
+    if TOOL_LOAD_SUMMARY_SHOWN or not TOOL_LOAD_EVENTS:
+        return
+
+    print(f"🧰 Added {len(TOOL_LOAD_EVENTS)} tool definition(s):")
+    for event in TOOL_LOAD_EVENTS:
+        if event["status"] == "override":
+            print(f" - {event['name']} [{event['source']}] overriding {event['previous_source']}")
+        else:
+            print(f" - {event['name']} [{event['source']}]")
+    print()
+    TOOL_LOAD_SUMMARY_SHOWN = True
 
 
 def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
@@ -1308,6 +1366,7 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
 
     # Only show startup banner/help when NOT resuming an existing session
     if not CONTINUE_SESSION:
+        _print_tool_load_summary()
         print(f"🤖 Chat with **{model}** started  [session: {CURRENT_SESSION_ID}]")
         print("Available commands:")
         print(" /exit, /quit, /bye → Save and exit")

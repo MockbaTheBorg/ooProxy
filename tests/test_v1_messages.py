@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import unittest
 
+import httpx
 from fastapi.testclient import TestClient
 
 from modules._server.app import create_app
@@ -42,6 +42,23 @@ class _DummyClient:
 
     async def aclose(self) -> None:
         return None
+
+
+class _FailingClient(_DummyClient):
+    async def chat(self, body: dict) -> dict:
+        self.last_chat_body = body
+        request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        response = httpx.Response(
+            402,
+            request=request,
+            json={
+                "error": {
+                    "message": "This request requires more credits, or fewer max_tokens.",
+                    "code": 402,
+                }
+            },
+        )
+        raise httpx.HTTPStatusError("payment required", request=request, response=response)
 
 
 class V1MessagesCompatibilityTests(unittest.TestCase):
@@ -143,6 +160,46 @@ class V1MessagesCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("tools", self.dummy.last_chat_body)
+
+    def test_upstream_error_becomes_assistant_message(self) -> None:
+        self.app.state.client = _FailingClient()
+
+        response = self.client.post(
+            "/v1/messages?beta=true",
+            json={
+                "model": "claude-test",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "hello there"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["type"], "message")
+        self.assertEqual(payload["role"], "assistant")
+        self.assertIn("402 Payment Required", payload["content"][0]["text"])
+        self.assertIn("requires more credits", payload["content"][0]["text"])
+
+    def test_streaming_upstream_error_becomes_assistant_message_events(self) -> None:
+        self.app.state.client = _FailingClient()
+
+        with self.client.stream(
+            "POST",
+            "/v1/messages?beta=true",
+            json={
+                "model": "claude-test",
+                "max_tokens": 256,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello there"}],
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes()).decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: message_start", body)
+        self.assertIn("event: content_block_delta", body)
+        self.assertIn("402 Payment Required", body)
+        self.assertIn("requires more credits", body)
 
 
 if __name__ == "__main__":

@@ -93,7 +93,18 @@ class _ToolCallingClient(_DummyClient):
 class _FailingStreamClient(_DummyClient):
     async def chat(self, body: dict) -> dict:
         self.last_chat_body = body
-        raise RuntimeError("simulated upstream stream failure")
+        request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        response = httpx.Response(
+            402,
+            request=request,
+            json={
+                "error": {
+                    "message": "This request requires more credits, or fewer max_tokens.",
+                    "code": 402,
+                }
+            },
+        )
+        raise httpx.HTTPStatusError("payment required", request=request, response=response)
 
 
 class _RetryingStreamClient(_DummyClient):
@@ -184,9 +195,26 @@ class V1ResponsesCompatibilityTests(unittest.TestCase):
             body = b"".join(response.iter_bytes()).decode("utf-8")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("event: error", body)
-        self.assertIn("event: response.failed", body)
-        self.assertIn("simulated upstream stream failure", body)
+        self.assertIn("event: response.created", body)
+        self.assertIn("event: response.output_text.delta", body)
+        self.assertIn("event: response.completed", body)
+        self.assertIn("402 Payment Required", body)
+        self.assertIn("requires more credits", body)
+
+    def test_non_streaming_error_becomes_completed_response(self) -> None:
+        self.app.state.client = _FailingStreamClient()
+
+        response = self.client.post("/v1/responses", json={"model": "demo", "input": "ping"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertIn("402 Payment Required", payload["output_text"])
+        self.assertIn("requires more credits", payload["output_text"])
+
+        message_item = payload["output"][0]
+        self.assertEqual(message_item["type"], "message")
+        self.assertIn("requires more credits", message_item["content"][0]["text"])
 
     def test_streaming_retries_without_stream_options(self) -> None:
         retrying_client = _RetryingStreamClient()

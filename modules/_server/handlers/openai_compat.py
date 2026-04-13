@@ -21,6 +21,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger("ooproxy")
 
+from modules._server.upstream_errors import (
+    assistant_error_text,
+    iter_openai_error_stream,
+    synthetic_anthropic_message,
+    synthetic_openai_chat_completion,
+    synthetic_responses_payload,
+)
 from modules._server.translate.request import responses_to_openai_chat
 from modules._server.translate.request import anthropic_messages_to_openai_chat
 from modules._server.translate.response import openai_chat_to_anthropic_message, openai_chat_to_responses
@@ -701,64 +708,19 @@ async def _anthropic_synthetic_stream(message_payload: dict) -> AsyncIterator[by
 
 def _synthetic_stream(model: str, text: str) -> StreamingResponse:
     """Return a fake streaming chat completion that renders as an assistant message in VS Code."""
-    cid = f"chatcmpl-{uuid.uuid4().hex[:16]}"
-    created = int(time.time())
-
-    def _chunk(delta: dict, finish_reason=None) -> str:
-        payload = {
-            "id": cid,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-        }
-        return f"data: {json.dumps(payload)}\n\n"
-
-    async def generate():
-        yield _chunk({"role": "assistant", "content": ""}).encode()
-        yield _chunk({"content": text}).encode()
-        yield _chunk({}, finish_reason="stop").encode()
-        yield b"data: [DONE]\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(iter_openai_error_stream(model, text), media_type="text/event-stream")
 
 
 def _synthetic_json(model: str, text: str) -> JSONResponse:
     """Return a fake non-streaming chat completion with the given text."""
-    return JSONResponse({
-        "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    })
+    return JSONResponse(synthetic_openai_chat_completion(model, text))
 
 
 def _upstream_error_response(exc: Exception, model: str, streaming: bool):
-    """Convert an upstream error to a response.
-
-    404 → synthetic assistant message (model listed but not available via API)
-    Other errors → HTTP error response forwarding the upstream status code.
-    """
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
-        logger.warning("v1 model not available (404) model=%s — listed but not accessible via API", model)
-        msg = (
-            f"**Model `{model}` is not available.**\n\n"
-            f"It appears in the model list but the API returned 404 (Not Found). "
-            f"This model may require a paid tier or special access on this provider.\n\n"
-            f"Please select a different model."
-        )
-        return _synthetic_stream(model, msg) if streaming else _synthetic_json(model, msg)
-
-    status = 502
-    if isinstance(exc, httpx.HTTPStatusError):
-        code = exc.response.status_code
-        if 400 <= code < 500:
-            status = code
-    msg = str(exc) or f"{type(exc).__name__}"
+    """Convert an upstream error to a synthetic assistant reply."""
+    msg = assistant_error_text(exc, model)
     logger.error("v1 upstream error for %s: %s", model, msg)
-    return JSONResponse({"error": {"message": msg, "type": "upstream_error"}}, status_code=status)
+    return _synthetic_stream(model, msg) if streaming else _synthetic_json(model, msg)
 
 
 async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
@@ -807,6 +769,7 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
         async def generate():
             finish = None
             usage: dict = {}
+            sent_any = False
             try:
                 async for line in upstream.aiter_lines():
                     if not line:
@@ -820,13 +783,22 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
                                     finish = choice["finish_reason"]
                             if chunk.get("usage"):
                                 usage = chunk["usage"]
+                            sent_any = True
                             yield f"data: {json.dumps(chunk)}\n\n".encode()
                         except json.JSONDecodeError:
+                            sent_any = True
                             yield f"{line}\n\n".encode()
                     else:
+                        sent_any = True
                         yield f"{line}\n\n".encode()
             except Exception as exc:
                 logger.error("v1 stream mid-error model=%s: %s", model, exc)
+                async for chunk in iter_openai_error_stream(
+                    model,
+                    assistant_error_text(exc, model),
+                    include_role=not sent_any,
+                ):
+                    yield chunk
             finally:
                 logger.info("v1 ← model=%s finish=%s prompt=%d compl=%d",
                             model, finish or "?",
@@ -890,15 +862,13 @@ async def v1_responses_handler(request: Request) -> StreamingResponse | JSONResp
         try:
             data, effective_nonstream_body = await _chat_with_retries(client, fallback, model, behavior=behavior, base_url=base_url)
         except Exception as exc:
-            return StreamingResponse(
-                _responses_failed_stream(
-                    body,
-                    response_id,
-                    previous_response_id=previous_response_id,
-                    message=str(exc) or type(exc).__name__,
-                ),
-                media_type="text/event-stream",
+            response_payload = synthetic_responses_payload(
+                body,
+                response_id,
+                assistant_error_text(exc, model),
+                previous_response_id=previous_response_id,
             )
+            return StreamingResponse(_responses_synthetic_stream(response_payload), media_type="text/event-stream")
 
         response_payload, assistant_messages = openai_chat_to_responses(
             data,
@@ -921,10 +891,15 @@ async def v1_responses_handler(request: Request) -> StreamingResponse | JSONResp
 
     try:
         data, effective_chat_body = await _chat_with_retries(client, chat_body, model, behavior=behavior, base_url=base_url)
-    except httpx.HTTPStatusError as exc:
-        return _responses_error_response(exc)
     except Exception as exc:
-        return _responses_error_response(exc)
+        return JSONResponse(
+            synthetic_responses_payload(
+                body,
+                response_id,
+                assistant_error_text(exc, model),
+                previous_response_id=previous_response_id,
+            )
+        )
 
     response_payload, assistant_messages = openai_chat_to_responses(
         data,
@@ -959,12 +934,11 @@ async def v1_messages_handler(request: Request) -> StreamingResponse | JSONRespo
     try:
         data, _ = await _chat_with_retries(client, fallback, model, behavior=behavior, base_url=base_url)
     except Exception as exc:
-        error_message = str(exc) or type(exc).__name__
+        error_message = assistant_error_text(exc, model)
+        anthropic_message = synthetic_anthropic_message(body, error_message)
         if body.get("stream"):
-            async def anthropic_error_stream():
-                yield _anthropic_event("error", {"error": {"type": "api_error", "message": error_message}})
-            return StreamingResponse(anthropic_error_stream(), media_type="text/event-stream")
-        return JSONResponse({"type": "error", "error": {"type": "api_error", "message": error_message}}, status_code=502)
+            return StreamingResponse(_anthropic_synthetic_stream(anthropic_message), media_type="text/event-stream")
+        return JSONResponse(anthropic_message)
 
     anthropic_message = openai_chat_to_anthropic_message(data, body)
     if body.get("stream"):

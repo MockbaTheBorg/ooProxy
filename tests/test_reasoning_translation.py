@@ -81,6 +81,50 @@ class ReasoningTranslationTests(unittest.IsolatedAsyncioTestCase):
         contents = [chunk["message"]["content"] for chunk in chunks if "message" in chunk and "content" in chunk["message"]]
         self.assertEqual(contents[:4], ["<think>", "Think first", "</think>", "Answer"])
 
+    async def test_sse_to_ndjson_accepts_behavior_flag_kwargs(self) -> None:
+        async def stream():
+            yield "data: " + json.dumps({
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "I will use a tool.",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"name": "read_file", "arguments": ""},
+                                }
+                            ],
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            })
+            yield "data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+            yield 'data: [DONE]'
+
+        observed_flags: set[str] = set()
+        chunks = []
+        async for raw in sse_to_ndjson(
+            stream(),
+            "demo",
+            behavior_flags={
+                "embedded_tool_call_text": True,
+                "embedded_tool_call_stop_finish": True,
+            },
+            observed_flags=observed_flags,
+        ):
+            chunks.append(json.loads(raw.decode("utf-8")))
+
+        tool_chunk = next(chunk for chunk in chunks if chunk.get("message", {}).get("tool_calls"))
+        self.assertEqual(tool_chunk["message"]["content"], "")
+        done_chunk = chunks[-1]
+        self.assertEqual(done_chunk["done_reason"], "tool_calls")
+        self.assertEqual(
+            observed_flags,
+            {"embedded_tool_call_text", "embedded_tool_call_stop_finish"},
+        )
+
 
 class NonStreamingReasoningTranslationTests(unittest.TestCase):
     def test_openai_chat_to_ollama_preserves_reasoning_content(self) -> None:
@@ -103,6 +147,47 @@ class NonStreamingReasoningTranslationTests(unittest.TestCase):
         self.assertEqual(
             translated["message"]["content"],
             "<think>Need to inspect file.</think>Here is the file.",
+        )
+
+    def test_openai_chat_to_ollama_accepts_behavior_flag_kwargs(self) -> None:
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "I will call a tool.",
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": json.dumps({"path": "README.md"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+        }
+
+        observed_flags: set[str] = set()
+        translated = openai_chat_to_ollama(
+            payload,
+            "demo",
+            behavior_flags={
+                "embedded_tool_call_text": True,
+                "embedded_tool_call_stop_finish": True,
+            },
+            observed_flags=observed_flags,
+        )
+
+        self.assertEqual(translated["message"]["content"], "")
+        self.assertEqual(translated["done_reason"], "tool_calls")
+        self.assertEqual(
+            observed_flags,
+            {"embedded_tool_call_text", "embedded_tool_call_stop_finish"},
         )
 
 

@@ -29,6 +29,7 @@ class OllamaChatToolLoadingTests(unittest.TestCase):
         ollama_chat.TOOL_SCHEMAS = ollama_chat._build_tool_schemas()
         ollama_chat.EXTERNAL_TOOL_FILES = []
         ollama_chat.TOOL_LOAD_EVENTS = []
+        ollama_chat.TOOL_LOAD_WARNINGS = []
         ollama_chat.TOOL_LOAD_SUMMARY_SHOWN = False
 
     def test_discovers_global_then_local_then_explicit_tool_files(self) -> None:
@@ -202,6 +203,110 @@ class OllamaChatToolLoadingTests(unittest.TestCase):
                 result = ollama_chat.execute_tool_call("show_file_head", {"path": "sample.txt", "lines": 2}, "off")
 
             self.assertEqual(result, "alpha\nbeta")
+
+    def test_single_tool_definition_object_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as cwd_dir:
+            tool_file = Path(home_dir) / ".ooProxy" / "tools" / "echo.json"
+            tool_file.parent.mkdir(parents=True)
+            tool_file.write_text(
+                json.dumps({
+                    "type": "function",
+                    "function": {
+                        "name": "echo_tool",
+                        "description": "Echo arguments.",
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                        "required": ["value"],
+                    },
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import json,sys; data=json.load(sys.stdin); print(data['value'])",
+                    ],
+                    "read_only": True,
+                }),
+                encoding="utf-8",
+            )
+
+            with patch("tools.ollama_chat.Path.home", return_value=Path(home_dir)), \
+                 patch("tools.ollama_chat.os.getcwd", return_value=cwd_dir):
+                ollama_chat.configure_tool_registry([])
+                result = ollama_chat.execute_tool_call("echo_tool", {"value": "hello"}, "off")
+
+            self.assertEqual(result, "hello")
+            self.assertEqual(ollama_chat.TOOL_LOAD_WARNINGS, [])
+
+    def test_invalid_external_tool_file_is_skipped_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as cwd_dir:
+            valid_file = Path(home_dir) / ".ooProxy" / "tools" / "valid.json"
+            invalid_file = Path(home_dir) / ".ooProxy" / "tools" / "invalid.json"
+            valid_file.parent.mkdir(parents=True)
+            valid_file.write_text(
+                json.dumps([
+                    _tool_entry("valid_tool", command="printf ok", description="valid tool"),
+                ]),
+                encoding="utf-8",
+            )
+            invalid_file.write_text(
+                json.dumps({
+                    "type": "function",
+                    "function": {"name": "broken_tool"},
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                }),
+                encoding="utf-8",
+            )
+
+            with patch("tools.ollama_chat.Path.home", return_value=Path(home_dir)), \
+                 patch("tools.ollama_chat.os.getcwd", return_value=cwd_dir):
+                ollama_chat.configure_tool_registry([])
+
+            self.assertIn("valid_tool", ollama_chat.TOOL_REGISTRY)
+            self.assertTrue(ollama_chat.TOOL_LOAD_WARNINGS)
+            self.assertIn(str(invalid_file.resolve()), ollama_chat.TOOL_LOAD_WARNINGS[0])
+
+    def test_schema_only_tool_uses_sibling_python_companion(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as cwd_dir:
+            tool_dir = Path(home_dir) / ".ooProxy" / "tools"
+            tool_file = tool_dir / "tui_qr.json"
+            companion_file = tool_dir / "show_qr_tui.py"
+            tool_dir.mkdir(parents=True)
+            tool_file.write_text(
+                json.dumps({
+                    "type": "function",
+                    "function": {
+                        "name": "show_qr_tui",
+                        "description": "Render a QR code.",
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                        },
+                        "required": ["text"],
+                    },
+                }),
+                encoding="utf-8",
+            )
+            companion_file.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import sys\n"
+                "payload = json.load(sys.stdin)\n"
+                "print(f\"QR:{payload['text']}\")\n",
+                encoding="utf-8",
+            )
+
+            with patch("tools.ollama_chat.Path.home", return_value=Path(home_dir)), \
+                 patch("tools.ollama_chat.os.getcwd", return_value=cwd_dir):
+                ollama_chat.configure_tool_registry([])
+                result = ollama_chat.execute_tool_call("show_qr_tui", {"text": "hello"}, "off")
+
+            self.assertEqual(result, "QR:hello")
+            self.assertEqual(ollama_chat.TOOL_LOAD_WARNINGS, [])
 
 
 if __name__ == "__main__":

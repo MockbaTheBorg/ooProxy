@@ -9,7 +9,9 @@ Schema of behavior.json:
       "<base_url>|<model>": {
         "strip_stream_options": true,
         "strip_tools": true,
-        "normalize_messages": true
+                "normalize_messages": true,
+                "embedded_tool_call_text": true,
+                "embedded_tool_call_stop_finish": true
       },
       ...
     }
@@ -28,7 +30,13 @@ logger = logging.getLogger("ooproxy")
 _CACHE_PATH = Path.home() / ".ooProxy" / "behavior.json"
 
 # All boolean flags that can be recorded for a model.
-KNOWN_FLAGS = frozenset({"strip_stream_options", "strip_tools", "normalize_messages"})
+KNOWN_FLAGS = frozenset({
+    "strip_stream_options",
+    "strip_tools",
+    "normalize_messages",
+    "embedded_tool_call_text",
+    "embedded_tool_call_stop_finish",
+})
 
 
 class BehaviorCache:

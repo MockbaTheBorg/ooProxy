@@ -38,6 +38,11 @@ def _extract_reasoning_text(payload: dict) -> str:
     return ""
 
 
+def _record_observed_flag(observed_flags: set[str] | None, flag: str) -> None:
+    if observed_flags is not None:
+        observed_flags.add(flag)
+
+
 def _tool_calls_to_ollama(tool_calls: list[dict]) -> list[dict]:
     out: list[dict] = []
     for index, tool_call in enumerate(tool_calls):
@@ -53,13 +58,32 @@ def _tool_calls_to_ollama(tool_calls: list[dict]) -> list[dict]:
     return out
 
 
-def openai_chat_to_ollama(data: dict, model: str) -> dict:
+def openai_chat_to_ollama(
+    data: dict,
+    model: str,
+    *,
+    behavior_flags: dict[str, bool] | None = None,
+    observed_flags: set[str] | None = None,
+) -> dict:
     """Convert a non-streaming OpenAI chat completion response to Ollama format."""
     choice = data["choices"][0]
     message = choice.get("message", {})
     usage = data.get("usage", {})
     reasoning = _extract_reasoning_text(message)
     content = message.get("content") or ""
+    finish_reason = choice.get("finish_reason") or "stop"
+    active_flags = behavior_flags or {}
+
+    if message.get("tool_calls") and isinstance(content, str) and content.strip():
+        if active_flags.get("embedded_tool_call_text"):
+            content = ""
+        _record_observed_flag(observed_flags, "embedded_tool_call_text")
+
+    if message.get("tool_calls") and finish_reason == "stop":
+        if active_flags.get("embedded_tool_call_stop_finish"):
+            finish_reason = "tool_calls"
+        _record_observed_flag(observed_flags, "embedded_tool_call_stop_finish")
+
     if reasoning:
         content = f"{THINK_TAG_OPEN}{reasoning}{THINK_TAG_CLOSE}{content}"
     ollama_message = {
@@ -73,7 +97,7 @@ def openai_chat_to_ollama(data: dict, model: str) -> dict:
         "created_at": _now_iso(),
         "message": ollama_message,
         "done": True,
-        "done_reason": choice.get("finish_reason") or "stop",
+        "done_reason": finish_reason,
         "eval_count": usage.get("completion_tokens", 0),
         "prompt_eval_count": usage.get("prompt_tokens", 0),
         "total_duration": 0,

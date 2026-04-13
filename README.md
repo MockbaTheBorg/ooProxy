@@ -281,9 +281,10 @@ ooProxy automatically handles backend-specific quirks without requiring any conf
 - **Tool stripping** — Some backends reject `tool_choice: "auto"`. ooProxy retries the request without tools if this error is received, so basic chat always works.
 - **System role normalisation** — Some models (e.g. Gemma) do not support the `system` role. ooProxy retries with system messages removed if the backend rejects them.
 - **Message alternation** — Some models require strict `user/assistant/user/assistant` alternation. ooProxy collapses consecutive same-role messages on retry.
+- **Learned model behavior cache** — ooProxy records per-endpoint/model quirks in `~/.ooProxy/behavior.json`, including request-side retry flags and response-shape quirks such as embedded textual tool calls.
 - **Vendor field stripping** — Backend-specific response fields (e.g. NVIDIA's `nvext`) are stripped before the response is returned to the client.
 
-All of these are triggered only on actual error responses — for backends that behave correctly, requests pass straight through with no transformation.
+Request retry rules are learned from actual upstream errors; response-shape quirks are learned when a model returns a successful but malformed-compatible response. For backends that behave correctly, requests pass straight through with no transformation.
 
 ---
 

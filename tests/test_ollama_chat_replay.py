@@ -377,6 +377,47 @@ class OllamaChatReplayTests(unittest.TestCase):
         self.assertNotIn('{"entries": ["README.md"]}', output)
         self.assertTrue(ollama_chat.CONTINUE_SESSION)
 
+    def test_sanitize_assistant_tool_preamble_strips_clipped_lead_in(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": "I'll check the current git status to see which patch you're",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "git_status",
+                        "arguments": json.dumps({}),
+                    },
+                }
+            ],
+        }
+
+        sanitized = ollama_chat._sanitize_assistant_tool_preamble(message)
+
+        self.assertEqual(sanitized["content"], "")
+        self.assertEqual(sanitized["tool_calls"], message["tool_calls"])
+
+    def test_sanitize_assistant_tool_preamble_keeps_non_preamble_content(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": "The repository has local changes, so I need to inspect git status more closely.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "git_status",
+                        "arguments": json.dumps({}),
+                    },
+                }
+            ],
+        }
+
+        sanitized = ollama_chat._sanitize_assistant_tool_preamble(message)
+
+        self.assertEqual(sanitized, message)
+
 
 if __name__ == "__main__":
     unittest.main()

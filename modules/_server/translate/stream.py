@@ -34,6 +34,11 @@ def _extract_reasoning_text(payload: dict) -> str:
     return ""
 
 
+def _record_observed_flag(observed_flags: set[str] | None, flag: str) -> None:
+    if observed_flags is not None:
+        observed_flags.add(flag)
+
+
 def _content_chunk(model: str, content: str) -> bytes:
     chunk = {
         "model": model,
@@ -63,7 +68,13 @@ def _finalize_tool_calls(tool_call_buffers: dict[int, dict[str, str | int]]) -> 
     return out
 
 
-async def sse_to_ndjson(sse_stream: AsyncIterator[Union[str, bytes]], model: str) -> AsyncIterator[bytes]:
+async def sse_to_ndjson(
+    sse_stream: AsyncIterator[Union[str, bytes]],
+    model: str,
+    *,
+    behavior_flags: dict[str, bool] | None = None,
+    observed_flags: set[str] | None = None,
+) -> AsyncIterator[bytes]:
     """Convert an OpenAI SSE stream to Ollama NDJSON byte chunks.
 
     Accepts either string lines (from httpx aiter_lines) or raw bytes.
@@ -76,6 +87,7 @@ async def sse_to_ndjson(sse_stream: AsyncIterator[Union[str, bytes]], model: str
     tool_call_buffers: dict[int, dict[str, str | int]] = {}
     tool_calls_emitted = False
     reasoning_open = False
+    active_flags = behavior_flags or {}
 
     async for raw in sse_stream:
         if isinstance(raw, bytes):
@@ -181,6 +193,16 @@ async def sse_to_ndjson(sse_stream: AsyncIterator[Union[str, bytes]], model: str
         reasoning = _extract_reasoning_text(delta)
         tool_calls = delta.get("tool_calls") or []
         finish_reason = choice.get("finish_reason")
+
+        if tool_calls and isinstance(content, str) and content.strip():
+            if active_flags.get("embedded_tool_call_text"):
+                content = ""
+            _record_observed_flag(observed_flags, "embedded_tool_call_text")
+
+        if tool_calls and finish_reason == "stop":
+            if active_flags.get("embedded_tool_call_stop_finish"):
+                finish_reason = "tool_calls"
+            _record_observed_flag(observed_flags, "embedded_tool_call_stop_finish")
 
         # Track finish_reason and warn on non-stop termination
         if finish_reason:

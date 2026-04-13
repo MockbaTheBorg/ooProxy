@@ -37,6 +37,7 @@ DEFAULT_RENDER_MODE = "hybrid"
 RENDER_MODES = ("markdown", "stream", "hybrid")
 DEFAULT_GUARDRAILS_MODE = "confirm-destructive"
 TOOL_LOAD_EVENTS: List[Dict[str, str]] = []
+TOOL_LOAD_WARNINGS: List[str] = []
 TOOL_LOAD_SUMMARY_SHOWN = False
 TURN_SEPARATOR_CHAR = "─"
 DEFAULT_HOST = "localhost"
@@ -805,7 +806,13 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
 
 
 def _normalize_external_tool_definition(raw_tool: Dict[str, Any], tool_file: str) -> Dict[str, Any]:
-    function = raw_tool.get("function") if raw_tool.get("type") == "function" else raw_tool
+    if raw_tool.get("type") == "function":
+        function = dict(raw_tool.get("function") or {})
+        for key in ("description", "parameters", "read_only", "destructive", "command", "argv", "cwd", "timeout"):
+            if key in raw_tool and key not in function:
+                function[key] = raw_tool[key]
+    else:
+        function = raw_tool
     if not isinstance(function, dict):
         raise ValueError(f"Invalid tool definition in {tool_file}: expected an object.")
 
@@ -826,16 +833,25 @@ def _normalize_external_tool_definition(raw_tool: Dict[str, Any], tool_file: str
     if isinstance(cwd, str) and cwd and not os.path.isabs(cwd):
         cwd = os.path.abspath(os.path.join(base_dir, cwd))
 
+    command = function.get("command")
+    argv = function.get("argv")
+    if not command and not argv:
+        companion_script = os.path.join(base_dir, f"{name}.py")
+        if os.path.isfile(companion_script):
+            argv = [sys.executable, companion_script]
+            if not cwd:
+                cwd = base_dir
+
     spec = {
         "description": function.get("description", "External command-backed tool."),
         "parameters": parameters,
         "source": tool_file,
         "read_only": bool(function.get("read_only", False)),
         "destructive": bool(function.get("destructive", False)),
-        "shell_command": bool(function.get("command")),
+        "shell_command": bool(command),
         "handler": _tool_command_handler_factory(name, {
-            "command": function.get("command"),
-            "argv": function.get("argv"),
+            "command": command,
+            "argv": argv,
             "cwd": cwd,
             "timeout": function.get("timeout", DEFAULT_TOOL_TIMEOUT),
         }),
@@ -843,33 +859,47 @@ def _normalize_external_tool_definition(raw_tool: Dict[str, Any], tool_file: str
     return {"name": name, "spec": spec}
 
 
-def _load_external_tools(tool_files: List[str]) -> List[Dict[str, Any]]:
+def _looks_like_external_tool_definition(payload: Dict[str, Any]) -> bool:
+    return bool(
+        payload.get("name")
+        or payload.get("function")
+        or payload.get("type") == "function"
+    )
+
+
+def _load_external_tools(tool_files: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     loaded: List[Dict[str, Any]] = []
+    warnings: List[str] = []
     for tool_file in tool_files:
         target = os.path.abspath(tool_file)
-        with open(target, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
+        try:
+            with open(target, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
 
-        if isinstance(payload, dict):
-            raw_tools = payload.get("tools")
-            if not isinstance(raw_tools, list):
-                raise ValueError(f"Tool file {target} must contain a 'tools' array.")
-        elif isinstance(payload, list):
-            raw_tools = payload
-        else:
-            raise ValueError(f"Tool file {target} must be a JSON object or array.")
+            if isinstance(payload, dict):
+                raw_tools = payload.get("tools")
+                if raw_tools is None and _looks_like_external_tool_definition(payload):
+                    raw_tools = [payload]
+                if not isinstance(raw_tools, list):
+                    raise ValueError("must contain a 'tools' array or a single tool definition object")
+            elif isinstance(payload, list):
+                raw_tools = payload
+            else:
+                raise ValueError("must be a JSON object or array")
 
-        for raw_tool in raw_tools:
-            if not isinstance(raw_tool, dict):
-                raise ValueError(f"Tool file {target} contains a non-object tool entry.")
-            normalized = _normalize_external_tool_definition(raw_tool, target)
-            loaded.append({
-                "name": normalized["name"],
-                "spec": normalized["spec"],
-                "file": target,
-            })
+            for raw_tool in raw_tools:
+                if not isinstance(raw_tool, dict):
+                    raise ValueError("contains a non-object tool entry")
+                normalized = _normalize_external_tool_definition(raw_tool, target)
+                loaded.append({
+                    "name": normalized["name"],
+                    "spec": normalized["spec"],
+                    "file": target,
+                })
+        except Exception as exc:
+            warnings.append(f"Skipping external tool file {target}: {exc}")
 
-    return loaded
+    return loaded, warnings
 
 
 TOOL_REGISTRY = _build_tool_registry()
@@ -893,12 +923,12 @@ TOOL_SCHEMAS = _build_tool_schemas()
 
 
 def configure_tool_registry(tool_files: Optional[List[str]] = None) -> None:
-    global TOOL_REGISTRY, TOOL_SCHEMAS, EXTERNAL_TOOL_FILES, TOOL_LOAD_EVENTS, TOOL_LOAD_SUMMARY_SHOWN
+    global TOOL_REGISTRY, TOOL_SCHEMAS, EXTERNAL_TOOL_FILES, TOOL_LOAD_EVENTS, TOOL_LOAD_WARNINGS, TOOL_LOAD_SUMMARY_SHOWN
 
     registry = _build_tool_registry()
     load_events: List[Dict[str, str]] = []
     resolved_files = discover_tool_definition_files(tool_files)
-    external_tools = _load_external_tools(resolved_files) if resolved_files else []
+    external_tools, warnings = _load_external_tools(resolved_files) if resolved_files else ([], [])
     for entry in external_tools:
         name = entry["name"]
         spec = entry["spec"]
@@ -915,22 +945,31 @@ def configure_tool_registry(tool_files: Optional[List[str]] = None) -> None:
     TOOL_SCHEMAS = _build_tool_schemas()
     EXTERNAL_TOOL_FILES = resolved_files
     TOOL_LOAD_EVENTS = load_events
+    TOOL_LOAD_WARNINGS = warnings
     TOOL_LOAD_SUMMARY_SHOWN = False
 
 
 def _print_tool_load_summary() -> None:
     global TOOL_LOAD_SUMMARY_SHOWN
 
-    if TOOL_LOAD_SUMMARY_SHOWN or not TOOL_LOAD_EVENTS:
+    if TOOL_LOAD_SUMMARY_SHOWN or (not TOOL_LOAD_EVENTS and not TOOL_LOAD_WARNINGS):
         return
 
-    print(f"🧰 Added {len(TOOL_LOAD_EVENTS)} tool definition(s):")
-    for event in TOOL_LOAD_EVENTS:
-        if event["status"] == "override":
-            print(f" - {event['name']} [{event['source']}] overriding {event['previous_source']}")
-        else:
-            print(f" - {event['name']} [{event['source']}]")
-    print()
+    if TOOL_LOAD_EVENTS:
+        print(f"🧰 Added {len(TOOL_LOAD_EVENTS)} tool definition(s):")
+        for event in TOOL_LOAD_EVENTS:
+            if event["status"] == "override":
+                print(f" - {event['name']} [{event['source']}] overriding {event['previous_source']}")
+            else:
+                print(f" - {event['name']} [{event['source']}]")
+        print()
+
+    if TOOL_LOAD_WARNINGS:
+        print(f"⚠️ Skipped {len(TOOL_LOAD_WARNINGS)} invalid external tool file(s):")
+        for warning in TOOL_LOAD_WARNINGS:
+            print(f" - {warning}")
+        print()
+
     TOOL_LOAD_SUMMARY_SHOWN = True
 
 

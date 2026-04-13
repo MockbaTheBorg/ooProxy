@@ -122,6 +122,87 @@ class OllamaChatToolLoadingTests(unittest.TestCase):
         self.assertIn("shared_tool [/tmp/local.json] overriding builtin", output)
         self.assertIn("new_tool [/tmp/global.json]", output)
 
+    def test_tools_markdown_table_formats_inventory(self) -> None:
+        ollama_chat.TOOL_REGISTRY = {
+            "alpha": {
+                "description": "Alpha tool",
+                "source": "builtin",
+                "read_only": True,
+                "parameters": {"type": "object", "properties": {}, "required": []},
+                "handler": lambda: "ok",
+            },
+            "beta": {
+                "description": "Writes | updates files",
+                "source": "/tmp/tools.json",
+                "read_only": False,
+                "parameters": {"type": "object", "properties": {}, "required": []},
+                "handler": lambda: "ok",
+            },
+        }
+        ollama_chat.TOOL_SCHEMAS = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "alpha",
+                    "description": "Alpha tool",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "beta",
+                    "description": "Writes | updates files",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+        ]
+
+        table = ollama_chat._tools_markdown_table()
+
+        self.assertIn("| Name | Source | Mode | Description |", table)
+        self.assertIn("| alpha | builtin | read-only | Alpha tool |", table)
+        self.assertIn("| beta | /tmp/tools.json | guarded | Writes \\| updates files |", table)
+
+    def test_external_tool_receives_session_cwd_for_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as cwd_dir:
+            tool_file = Path(home_dir) / ".ooProxy" / "tools" / "tools.json"
+            tool_file.parent.mkdir(parents=True)
+            Path(cwd_dir, "sample.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+            tool_file.write_text(
+                json.dumps({
+                    "tools": [
+                        {
+                            "name": "show_file_head",
+                            "description": "Read a file relative to the chat cwd.",
+                            "read_only": True,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "lines": {"type": "integer"},
+                                },
+                                "required": ["path"],
+                            },
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "import json,os,sys,pathlib; data=json.load(sys.stdin); base=pathlib.Path(os.environ['OLLAMA_TOOL_CWD']); path=pathlib.Path(data['path']); path = path if path.is_absolute() else (base / path); lines=int(data.get('lines',20)); print(''.join(path.read_text(encoding='utf-8').splitlines(True)[:lines]))",
+                            ],
+                            "cwd": ".",
+                        }
+                    ]
+                }),
+                encoding="utf-8",
+            )
+
+            with patch("tools.ollama_chat.Path.home", return_value=Path(home_dir)), \
+                 patch("tools.ollama_chat.os.getcwd", return_value=cwd_dir):
+                ollama_chat.configure_tool_registry([])
+                result = ollama_chat.execute_tool_call("show_file_head", {"path": "sample.txt", "lines": 2}, "off")
+
+            self.assertEqual(result, "alpha\nbeta")
+
 
 if __name__ == "__main__":
     unittest.main()

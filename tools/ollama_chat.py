@@ -483,6 +483,7 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         env = os.environ.copy()
         env["OLLAMA_TOOL_NAME"] = name
         env["OLLAMA_TOOL_ARGS"] = input_payload
+        env["OLLAMA_TOOL_CWD"] = os.getcwd()
         working_directory = os.path.abspath(cwd) if cwd else os.getcwd()
 
         result = subprocess.run(
@@ -798,8 +799,49 @@ def _message_display_text(message: Dict[str, Any]) -> str:
     return content
 
 
+def _message_tool_summaries(message: Dict[str, Any]) -> List[str]:
+    tool_calls = message.get("tool_calls") or []
+    if not tool_calls:
+        return []
+
+    if tool_calls and isinstance(tool_calls[0], dict) and tool_calls[0].get("function", {}).get("arguments") is not None:
+        normalized_calls = _normalize_openai_tool_calls(tool_calls)
+        if any(call.get("name") != "unknown_tool" for call in normalized_calls):
+            return [_tool_summary(call) for call in normalized_calls]
+
+    normalized_calls = _normalize_ollama_tool_calls(tool_calls)
+    return [_tool_summary(call) for call in normalized_calls]
+
+
+def _should_display_replayed_message(message: Dict[str, Any]) -> bool:
+    role = message.get("role", "assistant")
+    if role == "tool":
+        return False
+    return True
+
+
 def _print_message(message: Dict[str, Any]) -> None:
-    print(f"{_message_header(message.get('role', 'assistant'))}:")
+    role = message.get("role", "assistant")
+    if role == "tool":
+        return
+
+    if role == "assistant":
+        print(f"{_message_header(role)}:")
+        content = message.get("content") or ""
+        if content:
+            try:
+                render_markdown_to_terminal(content)
+            except Exception:
+                print(content)
+        tool_summaries = _message_tool_summaries(message)
+        if content and tool_summaries:
+            print()
+        for summary in tool_summaries:
+            print(f"[tool] {summary}")
+        print("\n")
+        return
+
+    print(f"{_message_header(role)}:")
     text = _message_display_text(message)
     if text:
         try:
@@ -860,6 +902,8 @@ def _tool_result_message(name: str, result: str, call_id: str, use_openai: bool)
     if use_openai:
         return {
             "role": "tool",
+            "tool_name": name,
+            "name": name,
             "tool_call_id": call_id,
             "content": result,
         }
@@ -1179,7 +1223,8 @@ def load_context() -> List[Dict]:
         with open(CONTEXT_FILE, "r", encoding="utf-8") as f:
             messages = json.load(f)
         if messages:
-            print(f"📂 Loaded {len(messages)//2} previous messages.\n")
+            visible_messages = sum(1 for message in messages if _should_display_replayed_message(message))
+            print(f"📂 Loaded {visible_messages} previous messages.\n")
             print("📜 Previous conversation:")
             print("=" * 60)
             for msg in messages:
@@ -1328,6 +1373,44 @@ def _print_resume_hint(active_model: str = "") -> None:
         print(f"💡 To resume: {prefix} {shlex.quote(model)} -r {shlex.quote(CURRENT_SESSION_ID)}")
 
 
+def _print_command_help(render_mode: str | None = None, guardrails_mode: str | None = None) -> None:
+    print("Available commands:")
+    print(" /exit, /quit, /bye → Save and exit")
+    print(" /reset → Clear all context")
+    print(" /compact → Summarize and shorten history")
+    print(" /model [name] → Switch model (no name lists available models)")
+    print(" /file <filename> → Add file to next message")
+    print(" /clearfiles → Clear attachment buffer")
+    print(" /tools → List available local tools")
+    print(" /sessions → List saved sessions for this folder")
+    print(" /status → View session information")
+    print(" /redraw → Clear the screen and replay the saved conversation")
+    print(" /? or /help → Show this help text")
+    if render_mode is not None:
+        print(f" Render mode: {render_mode}")
+    if guardrails_mode is not None:
+        print(f" Guardrails: {guardrails_mode}")
+    print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
+
+
+def _tools_markdown_table() -> str:
+    lines = [
+        f"🧰 Available local tools ({len(TOOL_SCHEMAS)}):",
+        "",
+        "| Name | Source | Mode | Description |",
+        "| --- | --- | --- | --- |",
+    ]
+    for schema in TOOL_SCHEMAS:
+        function = schema["function"]
+        tool_spec = TOOL_REGISTRY.get(function["name"], {})
+        tool_mode = "read-only" if tool_spec.get("read_only", False) else "guarded"
+        description = str(function["description"]).replace("|", "\\|")
+        source = _tool_display_source(tool_spec).replace("|", "\\|")
+        name = str(function["name"]).replace("|", "\\|")
+        lines.append(f"| {name} | {source} | {tool_mode} | {description} |")
+    return "\n".join(lines)
+
+
 def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: bool, render_mode: str, guardrails_mode: str):
     global ATTACHMENT_BUFFER
 
@@ -1368,19 +1451,7 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
     if not CONTINUE_SESSION:
         _print_tool_load_summary()
         print(f"🤖 Chat with **{model}** started  [session: {CURRENT_SESSION_ID}]")
-        print("Available commands:")
-        print(" /exit, /quit, /bye → Save and exit")
-        print(" /reset → Clear all context")
-        print(" /compact → Summarize and shorten history")
-        print(" /model [name] → Switch model (no name lists available models)")
-        print(" /file <filename> → Add file to next message")
-        print(" /clearfiles → Clear attachment buffer")
-        print(" /tools → List available local tools")
-        print(" /sessions → List saved sessions for this folder")
-        print(" /status → View session information")
-        print(f" Render mode: {render_mode}")
-        print(f" Guardrails: {guardrails_mode}")
-        print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
+        _print_command_help(render_mode=render_mode, guardrails_mode=guardrails_mode)
 
     while True:
         try:
@@ -1474,28 +1545,13 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
                 if not enable_tools:
                     print("🧰 Local tools are disabled for this session.")
                     continue
-                print(f"🧰 Available local tools ({len(TOOL_SCHEMAS)}):")
-                for schema in TOOL_SCHEMAS:
-                    function = schema["function"]
-                    tool_spec = TOOL_REGISTRY.get(function["name"], {})
-                    tool_mode = "read-only" if tool_spec.get("read_only", False) else "guarded"
-                    print(f" - {function['name']} [{_tool_display_source(tool_spec)}, {tool_mode}]: {function['description']}")
+                render_markdown_to_terminal(_tools_markdown_table())
+                print()
                 continue
 
             elif cmd in ['/?', '/help']:
                 # Show available commands/help
-                print("Available commands:")
-                print(" /exit, /quit, /bye → Save and exit")
-                print(" /reset → Clear all context")
-                print(" /compact → Summarize and shorten history")
-                print(" /model [name] → Switch model (no name lists available models)")
-                print(" /file <filename> → Add file to next message")
-                print(" /clearfiles → Clear attachment buffer")
-                print(" /tools → List available local tools")
-                print(" /sessions → List saved sessions for this folder")
-                print(" /status → View session information")
-                print(" /? or /help → Show this help text")
-                print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
+                _print_command_help()
                 continue
 
             elif cmd == '/clearfiles':

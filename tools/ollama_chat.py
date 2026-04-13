@@ -37,13 +37,16 @@ DEFAULT_RENDER_MODE = "markdown"
 DEFAULT_GUARDRAILS_MODE = "confirm-destructive"
 TOOL_LOAD_EVENTS: List[Dict[str, str]] = []
 TOOL_LOAD_SUMMARY_SHOWN = False
+TURN_SEPARATOR_CHAR = "─"
 
 # Optional rich-based Markdown renderer for prettier terminal output
 try:
     from rich.console import Console
     from rich.markdown import Markdown
+    from rich.rule import Rule
     _RICH_CONSOLE = Console()
 except Exception:
+    Rule = None
     _RICH_CONSOLE = None
 
 # ---------------------------------------------------------------------------
@@ -264,12 +267,34 @@ def render_markdown_to_terminal(text: str, console: Any = None) -> None:
         console = _RICH_CONSOLE
     if console:
         try:
-            console.print(Markdown(text))
+            with console.capture() as capture:
+                console.print(Markdown(text))
+            rendered = capture.get().splitlines()
+            while rendered and not rendered[0].strip():
+                rendered.pop(0)
+            while rendered and not rendered[-1].strip():
+                rendered.pop()
+            console.file.write("\n".join(rendered) + "\n")
+            flush = getattr(console.file, "flush", None)
+            if callable(flush):
+                flush()
             return
         except Exception:
             pass
     # Fallback
     print(text)
+
+
+def render_horizontal_rule(character: str = TURN_SEPARATOR_CHAR, console: Any = None) -> None:
+    if console is None:
+        console = _RICH_CONSOLE
+    if console and Rule is not None:
+        try:
+            console.print(Rule(characters=character))
+            return
+        except Exception:
+            pass
+    print(character * 79)
 
 
 def _truncate_text(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
@@ -765,14 +790,6 @@ def _tool_support_error(message: str) -> bool:
     return any(token in lower for token in ("tool", "tool_choice", "tool_calls", "function_call"))
 
 
-def _message_header(role: str) -> str:
-    return {
-        "user": ">>>",
-        "assistant": "<<<",
-        "tool": "[tool]",
-    }.get(role, f"[{role}]")
-
-
 def _message_display_text(message: Dict[str, Any]) -> str:
     role = message.get("role", "assistant")
     content = message.get("content") or ""
@@ -820,35 +837,87 @@ def _should_display_replayed_message(message: Dict[str, Any]) -> bool:
     return True
 
 
-def _print_message(message: Dict[str, Any]) -> None:
-    role = message.get("role", "assistant")
-    if role == "tool":
+def _render_message_text(text: str) -> None:
+    if not text:
         return
+    try:
+        render_markdown_to_terminal(text)
+    except Exception:
+        print(text)
 
-    if role == "assistant":
-        print(f"{_message_header(role)}:")
-        content = message.get("content") or ""
-        if content:
-            try:
-                render_markdown_to_terminal(content)
-            except Exception:
-                print(content)
-        tool_summaries = _message_tool_summaries(message)
-        if content and tool_summaries:
+
+def _print_turn_separator() -> None:
+    render_horizontal_rule()
+    print()
+
+
+def _print_question_line(text: str) -> None:
+    lines = text.splitlines() or [""]
+    print(f">>> {lines[0]}")
+    for line in lines[1:]:
+        print(line)
+
+
+def _print_assistant_message_body(message: Dict[str, Any], *, content_already_rendered: bool = False) -> bool:
+    content = message.get("content") or ""
+    tool_summaries = _message_tool_summaries(message)
+    printed_anything = False
+
+    if content and not content_already_rendered:
+        _render_message_text(content)
+        printed_anything = True
+
+    if tool_summaries:
+        if printed_anything or content_already_rendered:
             print()
         for summary in tool_summaries:
             print(f"[tool] {summary}")
-        print("\n")
-        return
+        printed_anything = True
 
-    print(f"{_message_header(role)}:")
-    text = _message_display_text(message)
-    if text:
-        try:
-            render_markdown_to_terminal(text)
-        except Exception:
-            print(text)
-    print("\n")
+    return printed_anything or bool(content and content_already_rendered)
+
+
+def _replay_conversation(messages: List[Dict[str, Any]]) -> None:
+    pending_question: Optional[str] = None
+    answer_messages: List[Dict[str, Any]] = []
+
+    def flush_event() -> None:
+        nonlocal pending_question, answer_messages
+        if pending_question is None:
+            return
+
+        _print_question_line(pending_question)
+        if answer_messages:
+            print()
+            for index, answer_message in enumerate(answer_messages):
+                if index:
+                    print()
+                _print_assistant_message_body(answer_message)
+            _print_turn_separator()
+        else:
+            print()
+
+        pending_question = None
+        answer_messages = []
+
+    for message in messages:
+        role = message.get("role", "assistant")
+        if role == "tool":
+            continue
+        if role == "user":
+            flush_event()
+            pending_question = _message_display_text(message)
+            continue
+        if role == "assistant":
+            if pending_question is None:
+                pending_question = ""
+            answer_messages.append(message)
+            continue
+        flush_event()
+        _render_message_text(_message_display_text(message))
+        print()
+
+    flush_event()
 
 
 def _normalize_openai_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1226,10 +1295,7 @@ def load_context() -> List[Dict]:
             visible_messages = sum(1 for message in messages if _should_display_replayed_message(message))
             print(f"📂 Loaded {visible_messages} previous messages.\n")
             print("📜 Previous conversation:")
-            print("=" * 60)
-            for msg in messages:
-                _print_message(msg)
-            print("=" * 60)
+            _replay_conversation(messages)
             # Mark that we are continuing a session so callers can
             # suppress redundant startup output (banner, help, etc.)
             global CONTINUE_SESSION
@@ -1373,31 +1439,39 @@ def _print_resume_hint(active_model: str = "") -> None:
         print(f"💡 To resume: {prefix} {shlex.quote(model)} -r {shlex.quote(CURRENT_SESSION_ID)}")
 
 
-def _print_command_help(render_mode: str | None = None, guardrails_mode: str | None = None) -> None:
-    print("Available commands:")
-    print(" /exit, /quit, /bye → Save and exit")
-    print(" /reset → Clear all context")
-    print(" /compact → Summarize and shorten history")
-    print(" /model [name] → Switch model (no name lists available models)")
-    print(" /file <filename> → Add file to next message")
-    print(" /clearfiles → Clear attachment buffer")
-    print(" /tools → List available local tools")
-    print(" /sessions → List saved sessions for this folder")
-    print(" /status → View session information")
-    print(" /redraw → Clear the screen and replay the saved conversation")
-    print(" /? or /help → Show this help text")
+def _command_help_markdown(render_mode: str | None = None, guardrails_mode: str | None = None) -> str:
+    lines = [
+        "| Command | Action |",
+        "| --- | --- |",
+        "| /exit, /quit, /bye | Save and exit |",
+        "| /reset | Clear all context |",
+        "| /compact | Summarize and shorten history |",
+        "| /model [name] | Switch model; with no name, list available models |",
+        "| /file <filename> | Add file to the next message |",
+        "| /clearfiles | Clear attachment buffer |",
+        "| /tools | List available local tools |",
+        "| /sessions | List saved sessions for this folder |",
+        "| /status | View session information |",
+        "| /redraw | Clear the screen and replay the saved conversation |",
+        "| /? or /help | Show this help text |",
+        "",
+        "Enter to submit. Alt-Enter, Shift-Enter, or Ctrl-J inserts a new line.",
+    ]
     if render_mode is not None:
-        print(f" Render mode: {render_mode}")
+        lines.append(f"Current render mode: {render_mode}")
     if guardrails_mode is not None:
-        print(f" Guardrails: {guardrails_mode}")
-    print(" Enter → submit | Alt-Enter / Shift-Enter / Ctrl-J → new line\n")
+        lines.append(f"Current guardrails: {guardrails_mode}")
+    return "\n".join(lines)
+
+
+def _print_command_help(render_mode: str | None = None, guardrails_mode: str | None = None) -> None:
+    render_markdown_to_terminal(_command_help_markdown(render_mode, guardrails_mode))
+    print()
 
 
 def _tools_markdown_table() -> str:
     lines = [
-        f"🧰 Available local tools ({len(TOOL_SCHEMAS)}):",
-        "",
-        "| Name | Source | Mode | Description |",
+        f"| Name | Source | Mode | Description |",
         "| --- | --- | --- | --- |",
     ]
     for schema in TOOL_SCHEMAS:
@@ -1546,7 +1620,6 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
                     print("🧰 Local tools are disabled for this session.")
                     continue
                 render_markdown_to_terminal(_tools_markdown_table())
-                print()
                 continue
 
             elif cmd in ['/?', '/help']:
@@ -1624,9 +1697,8 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
 
             messages.append({"role": "user", "content": full_user_message})
 
-            print("<<< ", end="", flush=True)
-
             request_uses_tools = enable_tools
+            turn_has_visible_output = False
             while True:
                 payload: Dict[str, Any] = {
                     "model": model,
@@ -1652,21 +1724,23 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
                 messages.append(assistant_message)
 
                 content = assistant_message.get("content") or ""
+                if content:
+                    turn_has_visible_output = True
                 if content and render_mode == "markdown":
-                    print()
-                    try:
-                        render_markdown_to_terminal(content)
-                    except Exception:
-                        print(content)
+                    _render_message_text(content)
 
                 if not normalized_calls:
                     if not content:
                         print()
+                    if turn_has_visible_output:
+                        _print_turn_separator()
                     break
 
-                print()
+                if content or turn_has_visible_output:
+                    print()
                 for call in normalized_calls:
                     print(f"[tool] { _tool_summary(call) }")
+                    turn_has_visible_output = True
                     try:
                         result = execute_tool_call(call["name"], call["arguments"], guardrails_mode)
                     except Exception as exc:

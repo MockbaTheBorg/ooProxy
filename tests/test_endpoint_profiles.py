@@ -15,7 +15,7 @@ class EndpointProfileResolutionTests(unittest.TestCase):
 
         self.assertIsNotNone(profile)
         self.assertEqual(profile.id, "together_ai")
-        self.assertEqual(profile.models_path, "/models")
+        self.assertEqual(profile.models_path, "models")
         self.assertEqual(profile.models_format, "array")
         self.assertEqual(profile.chat_streaming, "sse")
         self.assertEqual(profile.chat_tools, "trial")
@@ -36,7 +36,7 @@ class EndpointProfileResolutionTests(unittest.TestCase):
 class EndpointProfileClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_models_normalizes_together_array_payload(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(str(request.url), "https://api.together.xyz/models")
+            self.assertEqual(str(request.url), "https://api.together.xyz/v1/models")
             return httpx.Response(
                 200,
                 request=request,
@@ -100,6 +100,24 @@ class EndpointProfileClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ready)
         self.assertIsNone(reason)
+
+    async def test_get_models_reports_redirect_to_signin_as_upstream_error(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(str(request.url), "https://api.together.xyz/v1/models")
+            return httpx.Response(
+                307,
+                request=request,
+                headers={"location": "/signin?redirectUrl=%2Fmodels"},
+            )
+
+        client = OpenAIClient(ProxyConfig(url="https://api.together.xyz/v1", key="", port=11434))
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "redirected to /signin"):
+                await client.get_models()
+        finally:
+            await client.aclose()
 
 
 if __name__ == "__main__":

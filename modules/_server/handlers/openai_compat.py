@@ -919,7 +919,10 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
 async def v1_models_handler(request: Request) -> JSONResponse:
     """GET /v1/models — pass through the remote model list."""
     client = request.app.state.client
-    data = await client.get_models()
+    try:
+        data = await client.get_models()
+    except Exception as exc:
+        return JSONResponse({"error": {"message": str(exc), "type": "upstream_error"}}, status_code=502)
     return JSONResponse(data)
 
 

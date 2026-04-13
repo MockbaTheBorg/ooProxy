@@ -5,7 +5,7 @@
     "host_suffixes": ["together.xyz"]
   },
   "models": {
-    "path": "/models",
+    "path": "models",
     "format": "array"
   },
   "health": {

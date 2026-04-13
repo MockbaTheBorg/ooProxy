@@ -86,6 +86,10 @@ class _RecordingClient:
     async def aclose(self) -> None:
         return None
 
+class _FailingModelsClient(_FailingClient):
+    async def get_models(self) -> dict:
+        raise RuntimeError("upstream /models redirected to /signin?redirectUrl=%2Fmodels; check the API base URL and credentials")
+
 
 class ApiErrorResponseTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -208,6 +212,26 @@ class ApiErrorResponseTests(unittest.TestCase):
         self.assertNotIn("tools", recording.last_chat_body)
         self.assertNotIn("tool_choice", recording.last_chat_body)
         self.assertEqual([message["role"] for message in recording.last_chat_body["messages"]], ["user"])
+
+    def test_api_tags_returns_upstream_error_for_model_redirect(self) -> None:
+        self.app.state.client = _FailingModelsClient()
+
+        response = self.client.get("/api/tags")
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["error"]["type"], "upstream_error")
+        self.assertIn("redirected to /signin", payload["error"]["message"])
+
+    def test_v1_models_returns_upstream_error_for_model_redirect(self) -> None:
+        self.app.state.client = _FailingModelsClient()
+
+        response = self.client.get("/v1/models")
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(payload["error"]["type"], "upstream_error")
+        self.assertIn("redirected to /signin", payload["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -9,18 +9,27 @@ from fastapi.responses import JSONResponse
 
 from modules._server.translate.models import openai_models_to_ollama_tags, openai_model_to_ollama_show
 
+def _models_error_response(exc: Exception) -> JSONResponse:
+    return JSONResponse({"error": {"message": str(exc), "type": "upstream_error"}}, status_code=502)
+
 
 async def tags_handler(request: Request) -> JSONResponse:
     """GET /api/tags — list available models in Ollama format."""
     client = request.app.state.client
-    data = await client.get_models()
+    try:
+        data = await client.get_models()
+    except Exception as exc:
+        return _models_error_response(exc)
     return JSONResponse(openai_models_to_ollama_tags(data))
 
 
 async def ps_handler(request: Request) -> JSONResponse:
     """GET /api/ps — list 'running' models (synthesized from remote list)."""
     client = request.app.state.client
-    data = await client.get_models()
+    try:
+        data = await client.get_models()
+    except Exception as exc:
+        return _models_error_response(exc)
     tags = openai_models_to_ollama_tags(data)
     # Add size_vram field expected by some clients
     for model in tags["models"]:

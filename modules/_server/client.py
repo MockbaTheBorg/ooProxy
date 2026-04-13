@@ -154,6 +154,27 @@ def _normalize_models_payload(data: object, profile: EndpointProfile | None = No
 
     raise TypeError(f"Unsupported model-list payload: {type(data).__name__}")
 
+def _decode_json_response(response: httpx.Response, *, path: str) -> object:
+    location = response.headers.get("location", "").strip()
+    if 300 <= response.status_code < 400:
+        detail = f"upstream {path} redirected"
+        if location:
+            detail = f"{detail} to {location}"
+        raise RuntimeError(f"{detail}; check the API base URL and credentials")
+
+    content_type = response.headers.get("content-type", "")
+    if "json" not in content_type.lower():
+        preview = response.text.strip()[:120]
+        extra = f"; received {content_type or 'unknown content-type'}"
+        if preview:
+            extra = f"{extra}: {preview}"
+        raise RuntimeError(f"upstream {path} did not return JSON{extra}")
+
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"upstream {path} returned invalid JSON: {exc}") from exc
+
 
 # ---------------------------------------------------------------------------
 # Client
@@ -313,11 +334,14 @@ class OpenAIClient:
         url = self._url_for_path(path)
         headers = {**self._headers, "Accept": "application/json"}
         t0 = time.perf_counter()
-        r = await self._client.get(url, headers=headers)
+        r = await self._client.get(url, headers=headers, follow_redirects=False)
         latency_ms = (time.perf_counter() - t0) * 1000
+        if 300 <= r.status_code < 400:
+            _decode_json_response(r, path=path)
         r.raise_for_status()
         logger.debug("upstream GET %s ← %.0fms", path, latency_ms)
-        return _normalize_models_payload(_strip_vendor(r.json()), self.endpoint_profile)
+        payload = _decode_json_response(r, path=path)
+        return _normalize_models_payload(_strip_vendor(payload), self.endpoint_profile)
 
     async def chat(self, body: dict) -> dict:
         """POST /v1/chat/completions (non-streaming)."""

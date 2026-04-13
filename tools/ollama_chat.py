@@ -38,6 +38,8 @@ DEFAULT_GUARDRAILS_MODE = "confirm-destructive"
 TOOL_LOAD_EVENTS: List[Dict[str, str]] = []
 TOOL_LOAD_SUMMARY_SHOWN = False
 TURN_SEPARATOR_CHAR = "─"
+DEFAULT_HOST = "localhost"
+DEFAULT_PORT = "11434"
 
 # Optional rich-based Markdown renderer for prettier terminal output
 try:
@@ -125,6 +127,8 @@ def _create_session(session_id: str, model: str) -> None:
         session_id,
         cwd=os.path.abspath(os.getcwd()),
         model=model,
+        host=DEFAULT_HOST,
+        port=DEFAULT_PORT,
         created_at=_now_iso(),
         last_used=_now_iso(),
         message_count=0,
@@ -1434,9 +1438,20 @@ def compact_context(model: str, messages: List[Dict], base_url: str, use_openai:
 
 def _print_resume_hint(active_model: str = "") -> None:
     if CURRENT_SESSION_ID:
-        model = _resume_model(active_model) or "<model>"
+        meta = _read_session_meta(CURRENT_SESSION_ID) if CURRENT_SESSION_ID else {}
+        model = active_model or str(meta.get("model", "")).strip() or "<model>"
         prefix = LAUNCH_COMMAND_PREFIX or f"python {shlex.quote(os.path.basename(__file__))}"
-        print(f"💡 To resume: {prefix} {shlex.quote(model)} -r {shlex.quote(CURRENT_SESSION_ID)}")
+        parts = [prefix, shlex.quote(model)]
+
+        host = str(meta.get("host", DEFAULT_HOST)).strip() or DEFAULT_HOST
+        port = str(meta.get("port", DEFAULT_PORT)).strip() or DEFAULT_PORT
+        if host != DEFAULT_HOST:
+            parts.extend(["--host", shlex.quote(host)])
+        if port != DEFAULT_PORT:
+            parts.extend(["--port", shlex.quote(port)])
+
+        parts.extend(["-r", shlex.quote(CURRENT_SESSION_ID)])
+        print(f"💡 To resume: {' '.join(parts)}")
 
 
 def _command_help_markdown(render_mode: str | None = None, guardrails_mode: str | None = None) -> str:
@@ -1771,8 +1786,8 @@ def main():
     parser = argparse.ArgumentParser(description="Chat with Ollama models via CLI.")
     parser.add_argument("model", help="The model name to use (e.g., llama3.2)")
     parser.add_argument("-o", "--openai", action="store_true", help="Use OpenAI compatible API endpoint")
-    parser.add_argument("-H", "--host", default="localhost", help="Hostname or IP address of the Ollama server (default: localhost)")
-    parser.add_argument("-P", "--port", default="11434", help="Port of the Ollama server (default: 11434)")
+    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Hostname or IP address of the Ollama server (default: localhost)")
+    parser.add_argument("-P", "--port", default=DEFAULT_PORT, help="Port of the Ollama server (default: 11434)")
     parser.add_argument("-r", "--resume", metavar="SESSION_ID", default=None,
                         help="Resume a specific session by ID (see /sessions inside chat)")
     parser.add_argument("--new", action="store_true",
@@ -1794,6 +1809,7 @@ def main():
     new_session = args.new or args.clean
     session_id = resolve_session(args.resume, new_session, args.model)
     _init_session_paths(session_id)
+    _write_session_meta(session_id, model=args.model, host=args.host, port=str(args.port))
 
     # Make signals trigger clean exit so atexit handlers run
     def _handle_signal(signum, frame):

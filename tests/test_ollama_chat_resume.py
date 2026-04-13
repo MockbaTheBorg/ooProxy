@@ -40,6 +40,23 @@ class OllamaChatResumeHintTests(unittest.TestCase):
             "💡 To resume: python tools/ollama_chat.py qwen2.5-coder -r abc123",
         )
 
+    def test_resume_hint_includes_non_default_host_and_port(self) -> None:
+        ollama_chat.CURRENT_SESSION_ID = "abc123"
+
+        with patch.object(sys, "orig_argv", ["python", "tools/ollama_chat.py", "llama3.2"], create=True), \
+             patch(
+                 "tools.ollama_chat._read_session_meta",
+                 return_value={"model": "qwen2.5-coder", "host": "example.com", "port": "23456"},
+             ), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            ollama_chat._capture_launch_command_prefix()
+            ollama_chat._print_resume_hint()
+
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "💡 To resume: python tools/ollama_chat.py qwen2.5-coder --host example.com --port 23456 -r abc123",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

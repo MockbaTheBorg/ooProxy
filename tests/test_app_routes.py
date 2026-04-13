@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -35,6 +36,20 @@ class AppRouteCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             response.json(),
             {"status": "not ready", "reason": "client not initialized"},
+        )
+
+    def test_api_status_uses_client_readiness_probe(self) -> None:
+        async def probe_ready():
+            return False, "upstream health probe returned 503 for /api/tags"
+
+        self.app.state.client = SimpleNamespace(probe_ready=probe_ready)
+
+        response = self.client.get("/api/status")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"status": "not ready", "reason": "upstream health probe returned 503 for /api/tags"},
         )
 
 

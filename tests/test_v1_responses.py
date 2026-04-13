@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import json
 import unittest
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -239,6 +240,30 @@ class V1ResponsesCompatibilityTests(unittest.TestCase):
         self.assertNotIn("tools", retrying_client.calls[1])
         self.assertIn("event: response.completed", body)
         self.assertIn("fallback worked", body)
+
+    def test_profile_behavior_defaults_apply_before_trial_and_error(self) -> None:
+        self.app.state.endpoint_profile = SimpleNamespace(behavior_defaults={"strip_tools": True})
+
+        response = self.client.post(
+            "/v1/responses",
+            json={
+                "model": "demo",
+                "input": "ping",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Search",
+                        "description": "Search files.",
+                        "parameters": {"type": "object", "properties": {}, "required": []},
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("tools", self.dummy.last_chat_body)
+        self.assertNotIn("tool_choice", self.dummy.last_chat_body)
 
     def test_responses_function_tools_are_converted_for_chat_completions(self) -> None:
         self.app.state.client = _ToolCallingClient()

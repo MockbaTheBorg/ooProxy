@@ -33,4 +33,18 @@ async def show_handler(request: Request) -> JSONResponse:
     """POST /api/show — return synthesized model info."""
     body = await request.json()
     model_id = body.get("model") or body.get("name", "")
-    return JSONResponse(openai_model_to_ollama_show(model_id))
+    client = request.app.state.client
+    entry = None
+    try:
+        data = await client.get_models()
+        entry = next(
+            (
+                candidate
+                for candidate in data.get("data", [])
+                if isinstance(candidate, dict) and candidate.get("id") == model_id
+            ),
+            None,
+        )
+    except Exception:
+        entry = None
+    return JSONResponse(openai_model_to_ollama_show(model_id, entry=entry))

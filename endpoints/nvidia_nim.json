@@ -1,0 +1,20 @@
+{
+  "id": "nvidia_nim",
+  "match": {
+    "host_equals": ["integrate.api.nvidia.com", "ai.api.nvidia.com"],
+    "path_prefixes": ["/v1", "/"]
+  },
+  "models": {
+    "path": "models",
+    "format": "openai"
+  },
+  "health": {
+    "mode": "internal-ready"
+  },
+  "chat": {
+    "path": "chat/completions",
+    "streaming": "sse",
+    "tools": "trial",
+    "system_prompt": "supported"
+  }
+}

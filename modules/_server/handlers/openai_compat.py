@@ -206,11 +206,60 @@ def _apply_cached_flags(body: dict, flags: dict[str, bool]) -> dict:
     return current
 
 
+def _effective_behavior_flags(
+    *,
+    behavior,
+    base_url: str,
+    model: str,
+    endpoint_profile=None,
+) -> dict[str, bool]:
+    flags: dict[str, bool] = {}
+    if endpoint_profile is not None:
+        flags.update(getattr(endpoint_profile, "behavior_defaults", {}) or {})
+    if behavior:
+        flags.update(behavior.get_flags(base_url, model))
+    return flags
+
+
+def _profile_disables_streaming(endpoint_profile) -> bool:
+    if endpoint_profile is None:
+        return False
+    mode = str(getattr(endpoint_profile, "chat_streaming", "sse") or "sse").strip().lower()
+    return mode not in {"sse", "openai-sse", "supported", "trial"}
+
+
+def _apply_profile_chat_defaults(body: dict, endpoint_profile=None) -> dict:
+    if endpoint_profile is None:
+        return body
+
+    current = body
+    tools_mode = str(getattr(endpoint_profile, "chat_tools", "trial") or "trial").strip().lower()
+    if tools_mode in {"off", "disabled", "unsupported", "none", "never", "native"}:
+        current = _strip_tools(current)
+
+    system_prompt_mode = str(
+        getattr(endpoint_profile, "chat_system_prompt", "supported") or "supported"
+    ).strip().lower()
+    if system_prompt_mode in {"unsupported", "normalize", "inline-user", "merge"}:
+        current = _normalize_messages(current)
+
+    if _profile_disables_streaming(endpoint_profile) and current.get("stream"):
+        current = {k: v for k, v in current.items() if k not in ("stream", "stream_options")}
+        current["stream"] = False
+
+    return current
+
+
 async def _open_stream_with_retries(
-    client, body: dict, model: str, behavior=None, base_url: str = ""
+    client, body: dict, model: str, behavior=None, base_url: str = "", endpoint_profile=None
 ) -> tuple[httpx.Response, dict]:
-    flags = behavior.get_flags(base_url, model) if behavior else {}
-    current = _apply_cached_flags(body, flags)
+    flags = _effective_behavior_flags(
+        behavior=behavior,
+        base_url=base_url,
+        model=model,
+        endpoint_profile=endpoint_profile,
+    )
+    current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
@@ -241,10 +290,15 @@ async def _open_stream_with_retries(
 
 
 async def _chat_with_retries(
-    client, body: dict, model: str, behavior=None, base_url: str = ""
+    client, body: dict, model: str, behavior=None, base_url: str = "", endpoint_profile=None
 ) -> tuple[dict, dict]:
-    flags = behavior.get_flags(base_url, model) if behavior else {}
-    current = _apply_cached_flags(body, flags)
+    flags = _effective_behavior_flags(
+        behavior=behavior,
+        base_url=base_url,
+        model=model,
+        endpoint_profile=endpoint_profile,
+    )
+    current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
@@ -729,6 +783,7 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
     client = request.app.state.client
     behavior = getattr(request.app.state, "behavior", None)
     base_url = getattr(request.app.state, "base_url", "")
+    endpoint_profile = getattr(request.app.state, "endpoint_profile", None)
     streaming = body.get("stream", False)
     model = body.get("model", "?")
 
@@ -741,10 +796,35 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
         preview = (content[:200] + "…") if len(content) > 200 else content
         logger.debug("  msg[%d] role=%s: %s", i, role, preview)
 
+    if streaming and _profile_disables_streaming(endpoint_profile):
+        logger.info("v1/chat using synthetic stream due to endpoint profile for model=%s", model)
+        fallback = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
+        fallback["stream"] = False
+        try:
+            data, _ = await _chat_with_retries(
+                client,
+                fallback,
+                model,
+                behavior=behavior,
+                base_url=base_url,
+                endpoint_profile=endpoint_profile,
+            )
+        except Exception as exc:
+            return _upstream_error_response(exc, model, streaming=True)
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        return _synthetic_stream(model, content)
+
     if streaming:
         try:
             upstream, _ = await asyncio.wait_for(
-                _open_stream_with_retries(client, body, model, behavior=behavior, base_url=base_url),
+                _open_stream_with_retries(
+                    client,
+                    body,
+                    model,
+                    behavior=behavior,
+                    base_url=base_url,
+                    endpoint_profile=endpoint_profile,
+                ),
                 timeout=_TTFB_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -758,7 +838,14 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
             fallback = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
             fallback["stream"] = False
             try:
-                data, _ = await _chat_with_retries(client, fallback, model, behavior=behavior, base_url=base_url)
+                data, _ = await _chat_with_retries(
+                    client,
+                    fallback,
+                    model,
+                    behavior=behavior,
+                    base_url=base_url,
+                    endpoint_profile=endpoint_profile,
+                )
             except Exception as exc:
                 return _upstream_error_response(exc, model, streaming=True)
             content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
@@ -809,7 +896,14 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
 
     current = body
     try:
-        data, current = await _chat_with_retries(client, current, model, behavior=behavior, base_url=base_url)
+        data, current = await _chat_with_retries(
+            client,
+            current,
+            model,
+            behavior=behavior,
+            base_url=base_url,
+            endpoint_profile=endpoint_profile,
+        )
     except httpx.HTTPStatusError as exc:
         return _upstream_error_response(exc, model, streaming=False)
     except Exception as exc:
@@ -843,6 +937,7 @@ async def v1_responses_handler(request: Request) -> StreamingResponse | JSONResp
     client = request.app.state.client
     behavior = getattr(request.app.state, "behavior", None)
     base_url = getattr(request.app.state, "base_url", "")
+    endpoint_profile = getattr(request.app.state, "endpoint_profile", None)
     previous_response_id = body.get("previous_response_id")
     previous_messages = None
     if previous_response_id:
@@ -860,7 +955,14 @@ async def v1_responses_handler(request: Request) -> StreamingResponse | JSONResp
         fallback = {k: v for k, v in chat_request_body.items() if k not in ("stream", "stream_options")}
         fallback["stream"] = False
         try:
-            data, effective_nonstream_body = await _chat_with_retries(client, fallback, model, behavior=behavior, base_url=base_url)
+            data, effective_nonstream_body = await _chat_with_retries(
+                client,
+                fallback,
+                model,
+                behavior=behavior,
+                base_url=base_url,
+                endpoint_profile=endpoint_profile,
+            )
         except Exception as exc:
             response_payload = synthetic_responses_payload(
                 body,
@@ -890,7 +992,14 @@ async def v1_responses_handler(request: Request) -> StreamingResponse | JSONResp
             return synthetic
 
     try:
-        data, effective_chat_body = await _chat_with_retries(client, chat_body, model, behavior=behavior, base_url=base_url)
+        data, effective_chat_body = await _chat_with_retries(
+            client,
+            chat_body,
+            model,
+            behavior=behavior,
+            base_url=base_url,
+            endpoint_profile=endpoint_profile,
+        )
     except Exception as exc:
         return JSONResponse(
             synthetic_responses_payload(
@@ -917,6 +1026,7 @@ async def v1_messages_handler(request: Request) -> StreamingResponse | JSONRespo
     client = request.app.state.client
     behavior = getattr(request.app.state, "behavior", None)
     base_url = getattr(request.app.state, "base_url", "")
+    endpoint_profile = getattr(request.app.state, "endpoint_profile", None)
     model = body.get("model", "?")
     chat_body = anthropic_messages_to_openai_chat(body)
 
@@ -932,7 +1042,14 @@ async def v1_messages_handler(request: Request) -> StreamingResponse | JSONRespo
     fallback = {k: v for k, v in chat_body.items() if k not in ("stream", "stream_options")}
     fallback["stream"] = False
     try:
-        data, _ = await _chat_with_retries(client, fallback, model, behavior=behavior, base_url=base_url)
+        data, _ = await _chat_with_retries(
+            client,
+            fallback,
+            model,
+            behavior=behavior,
+            base_url=base_url,
+            endpoint_profile=endpoint_profile,
+        )
     except Exception as exc:
         error_message = assistant_error_text(exc, model)
         anthropic_message = synthetic_anthropic_message(body, error_message)

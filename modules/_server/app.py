@@ -121,6 +121,11 @@ async def _readyz(request: Request) -> JSONResponse:
     client = getattr(request.app.state, "client", None)
     if client is None:
         return JSONResponse({"status": "not ready", "reason": "client not initialized"}, status_code=503)
+    probe_ready = getattr(client, "probe_ready", None)
+    if callable(probe_ready):
+        ready, reason = await probe_ready()
+        if not ready:
+            return JSONResponse({"status": "not ready", "reason": reason or "upstream not ready"}, status_code=503)
     return JSONResponse({"status": "ready"})
 
 
@@ -133,10 +138,13 @@ def create_app(config: ProxyConfig) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.client = OpenAIClient(config)
         app.state.base_url = config.url     # canonical upstream URL for behavior cache keys
+        app.state.endpoint_profile = app.state.client.endpoint_profile
         app.state.behavior = BehaviorCache()
         app.state.responses_store = {}      # explicit — avoids lazy init scattered in handlers
         yield
-        await app.state.client.aclose()
+        aclose = getattr(app.state.client, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
     app = FastAPI(title="ooProxy", lifespan=lifespan)
     app.add_middleware(_RequestLoggingMiddleware)

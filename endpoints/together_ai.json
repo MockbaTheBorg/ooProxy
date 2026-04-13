@@ -1,0 +1,20 @@
+{
+  "id": "together_ai",
+  "match": {
+    "host_equals": ["api.together.xyz"],
+    "host_suffixes": ["together.xyz"]
+  },
+  "models": {
+    "path": "/models",
+    "format": "array"
+  },
+  "health": {
+    "mode": "internal-ready"
+  },
+  "chat": {
+    "path": "chat/completions",
+    "streaming": "sse",
+    "tools": "trial",
+    "system_prompt": "supported"
+  }
+}

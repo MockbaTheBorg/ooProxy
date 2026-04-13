@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
@@ -35,6 +36,45 @@ class _FailingClient:
     @asynccontextmanager
     async def stream_chat(self, body: dict):
         raise _payment_required_error()
+        yield
+
+    async def get_models(self) -> dict:
+        return {"data": []}
+
+    async def embeddings(self, body: dict) -> dict:
+        return {"data": []}
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.last_chat_body: dict | None = None
+
+    async def chat(self, body: dict) -> dict:
+        self.last_chat_body = body
+        return {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": body["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "profile fallback worked"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+        }
+
+    async def open_stream_chat(self, body: dict):
+        raise AssertionError("profile should force synthetic streaming without opening an upstream SSE stream")
+
+    @asynccontextmanager
+    async def stream_chat(self, body: dict):
+        raise AssertionError("not used")
         yield
 
     async def get_models(self) -> dict:
@@ -135,6 +175,39 @@ class ApiErrorResponseTests(unittest.TestCase):
         self.assertIn("data: ", body)
         self.assertIn("402 Payment Required", body)
         self.assertIn("requires more credits", body)
+
+    def test_v1_chat_profile_defaults_shape_request_before_send(self) -> None:
+        recording = _RecordingClient()
+        self.app.state.client = recording
+        self.app.state.endpoint_profile = SimpleNamespace(
+            chat_streaming="ndjson",
+            chat_tools="native",
+            chat_system_prompt="unsupported",
+            behavior_defaults={},
+        )
+
+        with self.client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": "demo",
+                "stream": True,
+                "messages": [
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "user", "content": "hello"},
+                ],
+                "tools": [{"type": "function", "function": {"name": "Search", "parameters": {"type": "object", "properties": {}, "required": []}}}],
+                "tool_choice": "auto",
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes()).decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("profile fallback worked", body)
+        self.assertFalse(recording.last_chat_body.get("stream", False))
+        self.assertNotIn("tools", recording.last_chat_body)
+        self.assertNotIn("tool_choice", recording.last_chat_body)
+        self.assertEqual([message["role"] for message in recording.last_chat_body["messages"]], ["user"])
 
 
 if __name__ == "__main__":

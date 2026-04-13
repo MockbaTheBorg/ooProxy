@@ -1,0 +1,22 @@
+{
+  "id": "local_ollama",
+  "match": {
+    "host_equals": ["localhost", "127.0.0.1"],
+    "ports": [11434]
+  },
+  "models": {
+    "path": "/api/tags",
+    "format": "ollama_tags"
+  },
+  "health": {
+    "mode": "http",
+    "method": "GET",
+    "path": "/api/tags"
+  },
+  "chat": {
+    "path": "/api/chat",
+    "streaming": "ndjson",
+    "tools": "native",
+    "system_prompt": "supported"
+  }
+}

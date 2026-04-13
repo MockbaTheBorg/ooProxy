@@ -9,10 +9,12 @@ import random
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from urllib.parse import urljoin
 
 import httpx
 
 from modules._server.config import ProxyConfig
+from modules._server.endpoint_profiles import EndpointProfile, resolve_endpoint_profile
 
 logger = logging.getLogger("ooproxy")
 
@@ -80,11 +82,77 @@ def _log_body(direction: str, body: dict) -> None:
 _VENDOR_KEYS = frozenset({"nvext", "x_groq", "x_request_id"})
 
 
-def _strip_vendor(data: dict) -> dict:
+def _strip_vendor(data: object) -> object:
     """Remove provider-specific top-level keys that must not reach the client."""
+    if not isinstance(data, dict):
+        return data
+    cleaned = dict(data)
     for key in _VENDOR_KEYS:
-        data.pop(key, None)
-    return data
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _normalize_model_entry(entry: dict) -> dict:
+    normalized = dict(entry)
+    normalized.setdefault("object", "model")
+    return normalized
+
+
+def _normalize_ollama_tags_payload(data: dict) -> dict:
+    items = []
+    for entry in data.get("models", []):
+        if not isinstance(entry, dict):
+            continue
+        model_id = str(entry.get("model") or entry.get("name") or "").strip()
+        if not model_id:
+            continue
+        details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+        normalized = {
+            "id": model_id,
+            "object": "model",
+            "created": None,
+            "owned_by": "ollama",
+        }
+        optional_fields = {
+            "modified_at": entry.get("modified_at"),
+            "digest": entry.get("digest"),
+            "family": details.get("family"),
+            "families": details.get("families"),
+            "format": details.get("format"),
+            "parameter_size": details.get("parameter_size"),
+            "quantization_level": details.get("quantization_level"),
+            "parent_model": details.get("parent_model"),
+            "capabilities": entry.get("capabilities"),
+        }
+        for key, value in optional_fields.items():
+            if value not in (None, "", []):
+                normalized[key] = value
+        items.append(normalized)
+    return {"object": "list", "data": items}
+
+
+def _normalize_models_payload(data: object, profile: EndpointProfile | None = None) -> dict:
+    profile_format = (profile.models_format if profile else "").strip().lower()
+
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return {
+            **data,
+            "data": [_normalize_model_entry(entry) for entry in data.get("data", []) if isinstance(entry, dict)],
+        }
+
+    if profile_format == "ollama_tags" and isinstance(data, dict):
+        return _normalize_ollama_tags_payload(data)
+
+    if profile_format == "array" and isinstance(data, list):
+        return {"object": "list", "data": [_normalize_model_entry(entry) for entry in data if isinstance(entry, dict)]}
+
+    if isinstance(data, list):
+        return {"object": "list", "data": [_normalize_model_entry(entry) for entry in data if isinstance(entry, dict)]}
+
+    if isinstance(data, dict) and isinstance(data.get("models"), list):
+        return _normalize_ollama_tags_payload(data)
+
+    raise TypeError(f"Unsupported model-list payload: {type(data).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +162,38 @@ def _strip_vendor(data: dict) -> dict:
 class OpenAIClient:
     def __init__(self, config: ProxyConfig) -> None:
         self._base = config.url
+        self.endpoint_profile = resolve_endpoint_profile(config.url)
         # Always include auth headers — some providers require them on /models too.
         self._headers: dict[str, str] = (
             {"Authorization": f"Bearer {config.key}"} if config.key else {}
         )
         self._client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
+        if self.endpoint_profile is not None:
+            logger.info("endpoint profile: using %s for %s", self.endpoint_profile.id, self._base)
+
+    def _url_for_path(self, path: str) -> str:
+        return urljoin(f"{self._base.rstrip('/')}/", path)
+
+    async def probe_ready(self) -> tuple[bool, str | None]:
+        profile = self.endpoint_profile
+        if profile is None or profile.health_mode == "internal-ready":
+            return True, None
+        if profile.health_mode != "http" or not profile.health_path:
+            return True, None
+
+        headers = {**self._headers, "Accept": "application/json"}
+        try:
+            response = await self._client.request(
+                profile.health_method or "GET",
+                self._url_for_path(profile.health_path),
+                headers=headers,
+            )
+        except Exception as exc:
+            return False, f"upstream health probe failed for {profile.health_path}: {exc}"
+
+        if response.status_code >= 400:
+            return False, f"upstream health probe returned {response.status_code} for {profile.health_path}"
+        return True, None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -113,7 +208,7 @@ class OpenAIClient:
         Centralises: auth headers, Accept header, request/response logging,
         latency measurement, retry/back-off, and vendor-field stripping.
         """
-        url = f"{self._base}/{path.lstrip('/')}"
+        url = self._url_for_path(path)
         headers = {**self._headers, "Accept": "application/json", **(extra_headers or {})}
         _log_body("→", body)
         last_exc: Exception | None = None
@@ -162,7 +257,7 @@ class OpenAIClient:
         Once the response headers are received the stream is live — retries only
         happen on connection/header-level failures, not mid-stream.
         """
-        url = f"{self._base}/{path.lstrip('/')}"
+        url = self._url_for_path(path)
         headers = {**self._headers, "Accept": "text/event-stream", **(extra_headers or {})}
         _log_body("→", body)
         last_exc: Exception | None = None
@@ -213,15 +308,16 @@ class OpenAIClient:
     # ------------------------------------------------------------------
 
     async def get_models(self) -> dict:
-        """GET /v1/models."""
-        url = f"{self._base}/models"
+        """GET the upstream model-list endpoint and normalize it to OpenAI format."""
+        path = self.endpoint_profile.models_path if self.endpoint_profile else "models"
+        url = self._url_for_path(path)
         headers = {**self._headers, "Accept": "application/json"}
         t0 = time.perf_counter()
         r = await self._client.get(url, headers=headers)
         latency_ms = (time.perf_counter() - t0) * 1000
         r.raise_for_status()
-        logger.debug("upstream GET /models ← %.0fms", latency_ms)
-        return _strip_vendor(r.json())
+        logger.debug("upstream GET %s ← %.0fms", path, latency_ms)
+        return _normalize_models_payload(_strip_vendor(r.json()), self.endpoint_profile)
 
     async def chat(self, body: dict) -> dict:
         """POST /v1/chat/completions (non-streaming)."""

@@ -88,6 +88,7 @@ def _api_router() -> APIRouter:
     r = APIRouter(prefix="/api")
     _nr = dict(response_model=None)
     # Tier 1 — VS Code Copilot core
+    r.add_api_route("/status",            _readyz,           methods=["GET", "HEAD"], **_nr)
     r.add_api_route("/version",           version_handler,   methods=["GET"],          **_nr)
     r.add_api_route("/tags",              tags_handler,      methods=["GET"],          **_nr)
     r.add_api_route("/chat",              chat_handler,      methods=["POST"],         **_nr)

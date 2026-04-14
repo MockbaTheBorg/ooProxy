@@ -16,5 +16,8 @@
     "streaming": "sse",
     "tools": "trial",
     "system_prompt": "supported"
+  },
+  "behavior": {
+    "strip_tool_choice_auto": true
   }
 }

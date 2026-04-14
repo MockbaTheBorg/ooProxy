@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -17,6 +18,42 @@ from modules._server.upstream_errors import (
 )
 
 logger = logging.getLogger("ooproxy")
+
+_TOOL_ERRORS = (
+    "tool choice requires",
+    "tool_choice",
+    "tools",
+    "function_call",
+    "enable-auto-tool-choice",
+    "tool-call-parser",
+)
+
+
+def _strip_tools(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
+
+
+def _strip_auto_tool_choice(body: dict) -> dict:
+    tool_choice = body.get("tool_choice")
+    if tool_choice == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    return body
+
+
+def _apply_native_request_flags(body: dict, flags: dict[str, bool]) -> dict:
+    current = body
+    if flags.get("strip_tool_choice_auto"):
+        current = _strip_auto_tool_choice(current)
+    if flags.get("strip_tools"):
+        current = _strip_tools(current)
+    return current
+
+
+def _is_tool_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in _TOOL_ERRORS)
 
 
 def _native_behavior_flags(request: Request, model: str) -> dict[str, bool]:
@@ -40,6 +77,54 @@ async def _record_native_behavior_flags(request: Request, model: str, observed_f
         await behavior.record(base_url, model, flag)
 
 
+async def _native_open_stream_with_retries(
+    request: Request,
+    client,
+    body: dict,
+    *,
+    model: str,
+    behavior_flags: dict[str, bool],
+) -> tuple[httpx.Response, set[str]]:
+    current = body
+    observed_flags: set[str] = set()
+    stripped_tools = behavior_flags.get("strip_tools", False)
+    while True:
+        try:
+            return await client.open_stream_chat(current), observed_flags
+        except httpx.HTTPStatusError as exc:
+            if not stripped_tools and _is_tool_error(exc) and "tools" in current:
+                logger.info("api/chat retrying without tools for model=%s", model)
+                current = _strip_tools(current)
+                stripped_tools = True
+                observed_flags.add("strip_tools")
+                continue
+            raise
+
+
+async def _native_chat_with_retries(
+    request: Request,
+    client,
+    body: dict,
+    *,
+    model: str,
+    behavior_flags: dict[str, bool],
+) -> tuple[dict, set[str]]:
+    current = body
+    observed_flags: set[str] = set()
+    stripped_tools = behavior_flags.get("strip_tools", False)
+    while True:
+        try:
+            return await client.chat(current), observed_flags
+        except httpx.HTTPStatusError as exc:
+            if not stripped_tools and _is_tool_error(exc) and "tools" in current:
+                logger.info("api/chat retrying without tools for model=%s", model)
+                current = _strip_tools(current)
+                stripped_tools = True
+                observed_flags.add("strip_tools")
+                continue
+            raise
+
+
 async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
     """POST /api/chat — translate and proxy to remote chat completions."""
     body = await request.json()
@@ -54,23 +139,37 @@ async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
             return StreamingResponse(iter_ollama_chat_error_stream(model, direct_reply), media_type="application/x-ndjson")
         return JSONResponse(synthetic_ollama_chat(model, direct_reply))
 
-    openai_body = chat_to_openai(body)
+    openai_body = _apply_native_request_flags(chat_to_openai(body), behavior_flags)
 
     logger.info("api/chat model=%s stream=%s msgs=%d",
                 model, streaming, len(body.get("messages", [])))
+    logger.debug(
+        "api/chat final upstream keys=%s tools=%s tool_choice=%r",
+        sorted(openai_body.keys()),
+        "tools" in openai_body,
+        openai_body.get("tool_choice"),
+    )
 
     if streaming:
         async def generate():
             observed_flags: set[str] = set()
             try:
-                async with client.stream_chat(openai_body) as lines:
-                    async for chunk in sse_to_ndjson(
-                        lines,
-                        model,
-                        behavior_flags=behavior_flags,
-                        observed_flags=observed_flags,
-                    ):
-                        yield chunk
+                upstream, retry_flags = await _native_open_stream_with_retries(
+                    request,
+                    client,
+                    openai_body,
+                    model=model,
+                    behavior_flags=behavior_flags,
+                )
+                observed_flags.update(retry_flags)
+                async for chunk in sse_to_ndjson(
+                    upstream.aiter_lines(),
+                    model,
+                    behavior_flags=behavior_flags,
+                    observed_flags=observed_flags,
+                ):
+                    yield chunk
+                await upstream.aclose()
                 if observed_flags:
                     await _record_native_behavior_flags(request, model, observed_flags)
             except Exception as exc:
@@ -81,7 +180,13 @@ async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
         return StreamingResponse(generate(), media_type="application/x-ndjson")
 
     try:
-        data = await client.chat(openai_body)
+        data, observed_flags = await _native_chat_with_retries(
+            request,
+            client,
+            openai_body,
+            model=model,
+            behavior_flags=behavior_flags,
+        )
     except Exception as exc:
         logger.error("api/chat upstream error model=%s: %s", model, exc)
         return JSONResponse(synthetic_ollama_chat(model, assistant_error_text(exc, model)))
@@ -90,7 +195,6 @@ async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
     logger.info("api/chat ← model=%s finish=%s prompt=%d compl=%d",
                 model, finish,
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
-    observed_flags: set[str] = set()
     translated = openai_chat_to_ollama(
         data,
         model,

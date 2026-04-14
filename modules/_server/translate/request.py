@@ -150,6 +150,14 @@ def _normalize_message_content_for_upstream(message: dict, *, fallback: str = " 
     return normalized
 
 
+def _normalize_tool_choice_for_upstream(tool_choice: object) -> object | None:
+    if tool_choice == "auto":
+        return None
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "auto":
+        return None
+    return tool_choice
+
+
 def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[str]) -> list[dict]:
     out: list[dict] = []
     pending_tool_calls: list[dict] = []
@@ -257,6 +265,11 @@ def sanitize_openai_chat_body(body: dict) -> dict:
     out = dict(body)
     messages = body.get("messages") or []
     out["messages"] = _normalize_openai_messages(messages if isinstance(messages, list) else [], direct_display_tools)
+    normalized_tool_choice = _normalize_tool_choice_for_upstream(body.get("tool_choice"))
+    if normalized_tool_choice is None:
+        out.pop("tool_choice", None)
+    else:
+        out["tool_choice"] = normalized_tool_choice
     if sanitized_tools is not None:
         out["tools"] = sanitized_tools
     else:
@@ -376,8 +389,9 @@ def chat_to_openai(body: dict) -> dict:
     }
     if sanitized_tools is not None:
         out["tools"] = sanitized_tools
-    if "tool_choice" in body:
-        out["tool_choice"] = body["tool_choice"]
+    normalized_tool_choice = _normalize_tool_choice_for_upstream(body.get("tool_choice"))
+    if normalized_tool_choice is not None:
+        out["tool_choice"] = normalized_tool_choice
     if "stream" in body:
         out["stream"] = body["stream"]
         if body["stream"]:
@@ -568,6 +582,9 @@ def _responses_tools_to_openai(tools: object) -> list[dict] | None:
 
 
 def _responses_tool_choice_to_openai(tool_choice: object) -> object:
+    tool_choice = _normalize_tool_choice_for_upstream(tool_choice)
+    if tool_choice is None:
+        return None
     if isinstance(tool_choice, str):
         if tool_choice == "required":
             return "required"
@@ -607,7 +624,9 @@ def responses_to_openai_chat(body: dict, previous_messages: list[dict] | None = 
     if converted_tools is not None:
         out["tools"] = converted_tools
     if body.get("tool_choice") is not None:
-        out["tool_choice"] = _responses_tool_choice_to_openai(body["tool_choice"])
+        normalized_tool_choice = _responses_tool_choice_to_openai(body["tool_choice"])
+        if normalized_tool_choice is not None:
+            out["tool_choice"] = normalized_tool_choice
     if out["stream"]:
         out["stream_options"] = {"include_usage": True}
     if body.get("temperature") is not None:
@@ -742,9 +761,7 @@ def anthropic_messages_to_openai_chat(body: dict) -> dict:
     tool_choice = body.get("tool_choice")
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
-        if choice_type == "auto":
-            out["tool_choice"] = "auto"
-        elif choice_type == "any":
+        if choice_type == "any":
             out["tool_choice"] = "required"
         elif choice_type == "tool" and tool_choice.get("name"):
             out["tool_choice"] = {"type": "function", "function": {"name": tool_choice["name"]}}

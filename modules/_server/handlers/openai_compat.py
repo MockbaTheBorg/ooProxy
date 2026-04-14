@@ -48,6 +48,12 @@ _TOOL_ERRORS = (
     "function_call",
 )
 
+_AUTO_TOOL_CHOICE_ERRORS = (
+    "auto tool choice requires",
+    "enable-auto-tool-choice",
+    "tool-call-parser",
+)
+
 _STREAM_OPTIONS_ERRORS = (
     "stream_options",
     "extra inputs are not permitted",  # pydantic-style rejection of unknown fields
@@ -103,8 +109,22 @@ def _strip_tools(body: dict) -> dict:
     return {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
 
 
+def _strip_auto_tool_choice(body: dict) -> dict:
+    tool_choice = body.get("tool_choice")
+    if tool_choice == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    return body
+
+
 def _strip_stream_options(body: dict) -> dict:
     return {k: v for k, v in body.items() if k != "stream_options"}
+
+
+def _is_auto_tool_choice_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in _AUTO_TOOL_CHOICE_ERRORS)
 
 
 def _should_disable_anthropic_tools(body: dict) -> bool:
@@ -202,6 +222,8 @@ def _apply_cached_flags(body: dict, flags: dict[str, bool]) -> dict:
     current = body
     if flags.get("strip_stream_options"):
         current = _strip_stream_options(current)
+    if flags.get("strip_tool_choice_auto"):
+        current = _strip_auto_tool_choice(current)
     if flags.get("strip_tools"):
         current = _strip_tools(current)
     if flags.get("normalize_messages"):
@@ -264,6 +286,7 @@ async def _open_stream_with_retries(
     )
     current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
+    stripped_auto_tool_choice = flags.get("strip_tool_choice_auto", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
     while True:
@@ -276,6 +299,12 @@ async def _open_stream_with_retries(
                 stripped_stream_options = True
                 if behavior:
                     await behavior.record(base_url, model, "strip_stream_options")
+            elif not stripped_auto_tool_choice and _is_auto_tool_choice_error(exc):
+                logger.info("v1 retrying without auto tool_choice for model=%s", model)
+                current = _strip_auto_tool_choice(current)
+                stripped_auto_tool_choice = True
+                if behavior:
+                    await behavior.record(base_url, model, "strip_tool_choice_auto")
             elif not stripped_tools and _is_tool_error(exc):
                 logger.info("v1 retrying without tools for model=%s", model)
                 current = _strip_tools(current)
@@ -303,6 +332,7 @@ async def _chat_with_retries(
     )
     current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
+    stripped_auto_tool_choice = flags.get("strip_tool_choice_auto", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
     while True:
@@ -315,6 +345,12 @@ async def _chat_with_retries(
                 stripped_stream_options = True
                 if behavior:
                     await behavior.record(base_url, model, "strip_stream_options")
+            elif not stripped_auto_tool_choice and _is_auto_tool_choice_error(exc):
+                logger.info("v1 retrying without auto tool_choice for model=%s", model)
+                current = _strip_auto_tool_choice(current)
+                stripped_auto_tool_choice = True
+                if behavior:
+                    await behavior.record(base_url, model, "strip_tool_choice_auto")
             elif not stripped_tools and _is_tool_error(exc):
                 logger.info("v1 retrying without tools for model=%s", model)
                 current = _strip_tools(current)

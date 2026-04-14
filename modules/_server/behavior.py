@@ -1,7 +1,7 @@
 """Persistent cache of per-model behavioral quirks discovered via trial-and-error.
 
 When ooProxy learns that a specific model at a specific endpoint needs special
-handling (e.g. strip stream_options, strip tools, normalize messages), it saves
+handling (e.g. strip stream_options, strip tools, strip auto tool_choice, normalize messages), it saves
 that knowledge to ~/.ooProxy/behavior.json so future sessions skip the retries.
 
 Schema of behavior.json:
@@ -9,6 +9,7 @@ Schema of behavior.json:
       "<base_url>|<model>": {
         "strip_stream_options": true,
         "strip_tools": true,
+            "strip_tool_choice_auto": true,
                 "normalize_messages": true,
                 "embedded_tool_call_text": true,
                 "embedded_tool_call_stop_finish": true
@@ -33,6 +34,7 @@ _CACHE_PATH = Path.home() / ".ooProxy" / "behavior.json"
 KNOWN_FLAGS = frozenset({
     "strip_stream_options",
     "strip_tools",
+    "strip_tool_choice_auto",
     "normalize_messages",
     "embedded_tool_call_text",
     "embedded_tool_call_stop_finish",

@@ -1,6 +1,6 @@
 # ooProxy
 
-A lightweight proxy that impersonates an [Ollama](https://ollama.com/) server locally while forwarding requests to any remote OpenAI-compatible API backend (NVIDIA NIM, OpenAI, Groq, Together AI, etc.).
+A lightweight proxy that impersonates an [Ollama](https://ollama.com/) server locally while forwarding requests to any remote OpenAI-compatible API backend (NVIDIA NIM, OpenAI, Groq, Together AI, OpenRouter, local Ollama, etc.).
 
 This lets you use tools that are hardcoded to talk to Ollama — such as **VS Code Copilot Chat** — with cloud-hosted models, without modifying the client.
 
@@ -21,7 +21,7 @@ VS Code Copilot Chat
   (NVIDIA NIM, OpenAI, Groq, …)
 ```
 
-ooProxy listens on `localhost:11434` and exposes the full Ollama API surface (`/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/v1/chat/completions`, `/v1/responses`, etc.). It translates requests to OpenAI format, forwards them to the configured remote backend, and translates the responses back — including streaming.
+ooProxy listens on `localhost:11434` and exposes the Ollama-native endpoints used by VS Code and Open WebUI (`/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`) plus OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, `/v1/responses`) and an Anthropic-compatible bridge at `/v1/messages`. It translates requests to OpenAI format where needed, forwards them to the configured remote backend, and translates the responses back — including streaming.
 
 ---
 
@@ -75,13 +75,26 @@ python ooproxy.py --serve
 
 The proxy starts on `http://127.0.0.1:11434` by default.
 
+Health and readiness endpoints are also available:
+
+- `GET /healthz` — process liveness
+- `GET /readyz` — upstream readiness based on the active endpoint profile
+- `GET /api/status` — Ollama-style readiness endpoint used by some clients
+
 #### Options
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
 | `--url URL` | `OPENAI_BASE_URL` | NVIDIA NIM | Remote API base URL |
 | `--key KEY` | `OPENAI_API_KEY` | _(none)_ | API key for the remote backend |
+| `-H, --host HOST` | — | `127.0.0.1` | Local address to bind |
 | `--port PORT` | — | `11434` | Local port to listen on |
+
+Global flags available to all CLI commands:
+
+- `-j, --json` — emit JSON envelopes from CLI commands
+- `-v, --verbose` — show more detail in CLI output and server logs
+- `-d, --debug` — enable debug logging (implies `--verbose`)
 
 If `--key` and `OPENAI_API_KEY` are both omitted, ooProxy looks up a stored key in `~/.ooProxy/keys.json` using the host portion of the remote URL.
 
@@ -128,15 +141,33 @@ JSON output:
 python ooproxy.py --list --json
 ```
 
-### ollama_chat tool files
+### ollama_chat CLI
 
 `tools/ollama_chat.py` supports built-in tools plus additional external tools loaded from JSON files with `-t/--tools`.
+
+It also keeps resumable per-folder sessions under `~/.ooProxy/sessions/`.
 
 Example:
 
 ```bash
 python tools/ollama_chat.py llama3.1 -t ./toolset.json
 ```
+
+Resume or force a fresh session:
+
+```bash
+python tools/ollama_chat.py llama3.1 --resume SESSION_ID
+python tools/ollama_chat.py llama3.1 --new
+python tools/ollama_chat.py llama3.1 --clean
+```
+
+By default, tool definition files are discovered in this order:
+
+- `~/.ooProxy/tools/*.json`
+- `./.ooProxy/tools/*.json`
+- Any files passed explicitly with `-t/--tools`
+
+Later definitions override earlier ones, so a repo-local tool can override a global tool or a built-in one.
 
 Example tool file:
 
@@ -175,6 +206,8 @@ Example tool file:
 
 Command-backed tools receive the tool arguments on stdin as a JSON object and in the `OLLAMA_TOOL_ARGS` environment variable.
 
+External tool processes also receive `OLLAMA_TOOL_CWD`, so relative paths can resolve against the active chat working directory.
+
 Built-in guardrails are enabled by default in `tools/ollama_chat.py` with `--guardrails confirm-destructive`.
 
 - Read-only built-in tools run automatically.
@@ -189,6 +222,13 @@ python tools/ollama_chat.py openai/gpt-oss-120b --guardrails confirm-destructive
 python tools/ollama_chat.py openai/gpt-oss-120b --guardrails read-only
 python tools/ollama_chat.py openai/gpt-oss-120b --guardrails off
 ```
+
+Other useful options:
+
+- `-o, --openai` — talk to the proxy through `/v1/chat/completions` instead of `/api/chat`
+- `--no-tools` — disable all local tool definitions for the session
+- `--render-mode markdown|stream|hybrid` — control how assistant output is rendered in the terminal
+- `-H, --host` / `-P, --port` — point the tool at a different ooProxy or Ollama endpoint
 
 ### ollama_chat regression test
 
@@ -229,7 +269,12 @@ python ooproxy.py -s --url https://api.fireworks.ai/inference/v1 --key fw_...
 
 # NVIDIA NIM (default)
 python ooproxy.py -s --url https://integrate.api.nvidia.com/v1 --key nvapi-...
+
+# Local Ollama used as the upstream backend
+python ooproxy.py -s --url http://localhost:11434/v1
 ```
+
+ooProxy also ships static endpoint profiles in `endpoints/*.json` for known providers, currently including NVIDIA NIM, OpenRouter, Together AI, and local Ollama. These profiles preconfigure things like model-list path normalization, streaming mode, tool defaults, and readiness probes so the proxy can avoid trial-and-error when the upstream host is already known.
 
 ---
 
@@ -283,8 +328,22 @@ ooProxy automatically handles backend-specific quirks without requiring any conf
 - **Message alternation** — Some models require strict `user/assistant/user/assistant` alternation. ooProxy collapses consecutive same-role messages on retry.
 - **Learned model behavior cache** — ooProxy records per-endpoint/model quirks in `~/.ooProxy/behavior.json`, including request-side retry flags and response-shape quirks such as embedded textual tool calls.
 - **Vendor field stripping** — Backend-specific response fields (e.g. NVIDIA's `nvext`) are stripped before the response is returned to the client.
+- **Assistant-shaped upstream errors** — Upstream API errors are converted into normal assistant replies or stream events on the Ollama, OpenAI Responses, and Anthropic-compatible surfaces so clients still receive a valid protocol response.
+- **Reasoning-to-Ollama translation** — OpenAI-style `reasoning_content` is translated into Ollama-visible `<think>...</think>` blocks, including streaming.
 
 Request retry rules are learned from actual upstream errors; response-shape quirks are learned when a model returns a successful but malformed-compatible response. For backends that behave correctly, requests pass straight through with no transformation.
+
+## Route coverage
+
+Implemented HTTP routes include:
+
+- Native and health routes: `/`, `/healthz`, `/readyz`, `/api/status`, `/api/version`
+- Ollama-compatible routes: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`
+- OpenAI-compatible routes: `/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, `/v1/responses`
+- Anthropic-compatible route: `/v1/messages`
+- Ollama model-management stubs: `/api/pull`, `/api/delete`, `/api/copy`, `/api/create`, `/api/push`, `/api/blobs/{digest}`
+
+The model-management endpoints return no-op success responses so Ollama-oriented clients can stay happy even when the remote backend has no equivalent model lifecycle API.
 
 ---
 
@@ -299,10 +358,15 @@ modules/
   list.py               # -l/--list   list remote models
   _server/              # Internal server package (not exposed as CLI modules)
     app.py              # FastAPI application factory
+    endpoint_profiles.py # Provider-specific endpoint behavior detection
     client.py           # Async HTTP client for the remote backend
     config.py           # ProxyConfig (URL, key, port)
     handlers/           # Route handlers for each Ollama endpoint
     translate/          # Ollama ↔ OpenAI request/response translation
+tools/
+  ollama_chat.py        # Interactive chat CLI with resumable sessions and local tools
+  ollama_keys.py        # Store/list/delete API keys in ~/.ooProxy/keys.json
+  ollama_list_models.py # Query model lists from an Ollama-compatible endpoint
 ```
 
 ---

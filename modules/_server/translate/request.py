@@ -137,6 +137,19 @@ def _sanitize_tools(tools: object) -> tuple[list[dict] | None, set[str]]:
     return sanitized_tools, direct_display_tools
 
 
+def _normalize_message_content_for_upstream(message: dict, *, fallback: str = " ") -> dict:
+    normalized = dict(message)
+    content = normalized.get("content")
+    if isinstance(content, str):
+        if content:
+            return normalized
+        normalized["content"] = fallback
+        return normalized
+    if content is None:
+        normalized["content"] = fallback
+    return normalized
+
+
 def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[str]) -> list[dict]:
     out: list[dict] = []
     pending_tool_calls: list[dict] = []
@@ -150,7 +163,7 @@ def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[s
                 function = tool_call.get("function") or {}
                 call_id = tool_call.get("id") or f"call_{message_index}_{tool_index}"
                 pending_tool_calls.append({"id": call_id, "name": function.get("name", "unknown_tool")})
-            normalized = dict(message)
+            normalized = _normalize_message_content_for_upstream(message)
             normalized["tool_calls"] = tool_calls
             out.append(normalized)
             continue
@@ -184,10 +197,10 @@ def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[s
                 )
             normalized.pop("display_content", None)
             normalized.pop("display_directly", None)
-            out.append(normalized)
+            out.append(_normalize_message_content_for_upstream(normalized))
             continue
 
-        out.append(dict(message))
+        out.append(_normalize_message_content_for_upstream(message))
 
     return out
 

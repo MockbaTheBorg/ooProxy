@@ -44,7 +44,6 @@ async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
     """POST /api/chat — translate and proxy to remote chat completions."""
     body = await request.json()
     client = request.app.state.client
-    openai_body = chat_to_openai(body)
     model = body.get("model", "")
     streaming = body.get("stream", False)
     behavior_flags = _native_behavior_flags(request, model)
@@ -54,6 +53,8 @@ async def chat_handler(request: Request) -> StreamingResponse | JSONResponse:
         if streaming:
             return StreamingResponse(iter_ollama_chat_error_stream(model, direct_reply), media_type="application/x-ndjson")
         return JSONResponse(synthetic_ollama_chat(model, direct_reply))
+
+    openai_body = chat_to_openai(body)
 
     logger.info("api/chat model=%s stream=%s msgs=%d",
                 model, streaming, len(body.get("messages", [])))

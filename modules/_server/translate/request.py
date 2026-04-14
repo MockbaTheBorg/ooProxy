@@ -10,6 +10,15 @@ import json
 _DEFAULT_MAX_TOKENS = 32768
 
 
+def _ensure_sentence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "unknown error."
+    if stripped.endswith((".", "!", "?")):
+        return stripped
+    return f"{stripped}."
+
+
 def _tool_failed(content: str) -> bool:
     if not content:
         return False
@@ -26,8 +35,53 @@ def _tool_failed(content: str) -> bool:
     return bool(payload.get("error")) and payload.get("ok") is not True
 
 
-def _tool_return_code_payload(content: str) -> str:
-    return json.dumps({"return_code": 1 if _tool_failed(content) else 0}, ensure_ascii=False)
+def _tool_failure_detail(content: str) -> str:
+    stripped = content.strip()
+    if not stripped:
+        return "unknown error"
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return stripped
+    if not isinstance(payload, dict):
+        return stripped
+
+    message = payload.get("message")
+    error = payload.get("error")
+    return_code = payload.get("return_code")
+
+    if isinstance(message, str) and message.strip():
+        if isinstance(error, str) and error.strip() and error.strip() not in message:
+            return f"{error.strip()}: {message.strip()}"
+        return message.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(return_code, int) and return_code != 0:
+        return f"return code {return_code}"
+    return stripped
+
+
+def _tool_status_message(content: str) -> str:
+    if _tool_failed(content):
+        return f"tool failed, error: {_ensure_sentence(_tool_failure_detail(content))}"
+    return "tool succeeded, no further action needed."
+
+
+def _is_tool_success_status(content: object) -> bool:
+    return isinstance(content, str) and content.strip() == "tool succeeded, no further action needed."
+
+
+def _is_tool_failure_status(content: object) -> bool:
+    return isinstance(content, str) and content.strip().startswith("tool failed, error:")
+
+
+def _implicit_direct_display_reply(message: dict) -> str | None:
+    content = message.get("display_content") if isinstance(message.get("display_content"), str) else message.get("content")
+    if _is_tool_success_status(content):
+        return ""
+    if _is_tool_failure_status(content):
+        return content if isinstance(content, str) else None
+    return None
 
 
 def _wrap_tool_output(content: str) -> str:
@@ -36,7 +90,7 @@ def _wrap_tool_output(content: str) -> str:
 
 def _tool_output_for_model(content: str, *, display_directly: bool) -> str:
     if display_directly:
-        return _tool_return_code_payload(content)
+        return _tool_status_message(content)
     if "\n" in content or content.startswith((" ", "\t")) or content.endswith(("\n", " ", "\t")):
         return _wrap_tool_output(content)
     return content
@@ -166,9 +220,6 @@ def _resolve_direct_display_tool_name(messages: list[dict], direct_display_tools
 
 def direct_display_tool_reply(body: dict) -> str | None:
     tools, direct_display_tools = _sanitize_tools(body.get("tools"))
-    if not direct_display_tools:
-        return None
-
     messages = body.get("messages") or []
     if not isinstance(messages, list) or not messages:
         return None
@@ -177,9 +228,12 @@ def direct_display_tool_reply(body: dict) -> str | None:
     if not isinstance(last_message, dict) or last_message.get("role") != "tool":
         return None
 
+    if not direct_display_tools:
+        return _implicit_direct_display_reply(last_message)
+
     tool_name = _resolve_direct_display_tool_name(messages, direct_display_tools, last_message)
     if not tool_name:
-        return None
+        return _implicit_direct_display_reply(last_message)
 
     content = last_message.get("display_content") if isinstance(last_message.get("display_content"), str) else last_message.get("content")
     return content if isinstance(content, str) else None

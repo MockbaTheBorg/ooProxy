@@ -3,6 +3,7 @@ import atexit
 import hashlib
 import json
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -762,6 +763,23 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
     if bool(command) == bool(argv):
         raise ValueError(f"External tool '{name}' must define exactly one of 'command' or 'argv'.")
 
+    placeholder_pattern = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+    def _stringify_argument(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False)
+
+    def _expand_template(template: str, *, shell_mode: bool, arguments: Dict[str, Any]) -> str:
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            if key not in arguments:
+                return match.group(0)
+            value = _stringify_argument(arguments[key])
+            return shlex.quote(value) if shell_mode else value
+
+        return placeholder_pattern.sub(_replace, template)
+
     def _run_external_tool(**arguments: Any) -> str:
         input_payload = json.dumps(arguments, ensure_ascii=False)
         env = os.environ.copy()
@@ -769,9 +787,14 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         env["OLLAMA_TOOL_ARGS"] = input_payload
         env["OLLAMA_TOOL_CWD"] = os.getcwd()
         working_directory = os.path.abspath(cwd) if cwd else os.getcwd()
+        expanded_command = _expand_template(command, shell_mode=True, arguments=arguments) if command else None
+        expanded_argv = [
+            _expand_template(str(part), shell_mode=False, arguments=arguments)
+            for part in argv
+        ] if argv else None
 
         result = subprocess.run(
-            command if command else [str(part) for part in argv],
+            expanded_command if expanded_command else expanded_argv,
             shell=bool(command),
             cwd=working_directory,
             input=input_payload,
@@ -785,7 +808,7 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         stderr = result.stderr.rstrip("\r\n")
         if result.returncode != 0:
             raise RuntimeError(_json_result({
-                "command": command if command else argv,
+                "command": expanded_command if expanded_command else expanded_argv,
                 "cwd": working_directory,
                 "exit_code": result.returncode,
                 "stdout": _truncate_text(stdout),
@@ -797,7 +820,7 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         if stderr:
             return _truncate_text(stderr)
         return _json_result({
-            "command": command if command else argv,
+            "command": expanded_command if expanded_command else expanded_argv,
             "cwd": working_directory,
             "exit_code": result.returncode,
         })
@@ -1019,8 +1042,45 @@ def _tool_result_failed(result: str) -> bool:
     return bool(payload.get("error")) and payload.get("ok") is not True
 
 
-def _tool_return_code_result(ok: bool) -> str:
-    return json.dumps({"return_code": 0 if ok else 1}, ensure_ascii=False)
+def _ensure_sentence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "unknown error."
+    if stripped.endswith((".", "!", "?")):
+        return stripped
+    return f"{stripped}."
+
+
+def _tool_failure_detail(result: str) -> str:
+    stripped = result.strip()
+    if not stripped:
+        return "unknown error"
+    try:
+        payload = json.loads(result)
+    except Exception:
+        return stripped
+    if not isinstance(payload, dict):
+        return stripped
+
+    message = payload.get("message")
+    error = payload.get("error")
+    return_code = payload.get("return_code")
+
+    if isinstance(message, str) and message.strip():
+        if isinstance(error, str) and error.strip() and error.strip() not in message:
+            return f"{error.strip()}: {message.strip()}"
+        return message.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(return_code, int) and return_code != 0:
+        return f"return code {return_code}"
+    return stripped
+
+
+def _tool_status_message(ok: bool, result: str) -> str:
+    if ok:
+        return "tool succeeded, no further action needed."
+    return f"tool failed, error: {_ensure_sentence(_tool_failure_detail(result))}"
 
 
 def _command_looks_destructive(command: str) -> bool:
@@ -1418,7 +1478,7 @@ def _tool_result_message_with_mode(
     display_directly: bool,
     ok: bool,
 ) -> Dict[str, Any]:
-    content = _tool_return_code_result(ok) if display_directly else result
+    content = _tool_status_message(ok, result) if display_directly else result
     if use_openai:
         message = {
             "role": "tool",

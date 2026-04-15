@@ -1,0 +1,21 @@
+{
+  "id": "z_ai",
+  "match": {
+    "host_equals": ["api.z.ai"],
+    "path_prefixes": ["/api/paas/v4"]
+  },
+  "models": {
+    "method": "GET",
+    "path": "models",
+    "format": "openai"
+  },
+  "health": {
+    "mode": "internal-ready"
+  },
+  "chat": {
+    "path": "chat/completions",
+    "streaming": "sse",
+    "tools": "supported",
+    "system_prompt": "supported"
+  }
+}

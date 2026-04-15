@@ -120,6 +120,8 @@ python ooproxy.py --cascade
 
 Cascade mode reads its full configuration from `~/.ooProxy/cascade.json`. In this mode, clients request the configured weak model name, ooProxy makes the weak/strong routing decision internally, and the client only ever sees the weak model name in model lists and responses.
 
+A ready-to-copy example config now lives at `examples/cascade.json`.
+
 Example `~/.ooProxy/cascade.json`:
 
 ```json
@@ -129,21 +131,16 @@ Example `~/.ooProxy/cascade.json`:
   "decision": {
     "threshold": 0.72,
     "timeout_seconds": 3.0,
-    "max_tokens": 96
+    "max_tokens": 96,
+    "system_prompt": "You are a task complexity evaluator. Your sole job is to assess whether a given prompt can be answered correctly and completely by a small, fast language model.\n\nYou must respond with ONLY a JSON object - no explanation, no preamble, no markdown fences.\n\nEvaluate along these axes:\n- Factual complexity: does this require deep or specialised knowledge?\n- Reasoning depth: does this require multi-step logic, inference, or planning?\n- Output quality bar: would a basic model's answer be good enough, or is nuance critical?\n- Ambiguity: is the prompt clear, or does it require interpretation?\n\nScoring guide:\n  1.0  Trivially simple - greetings, basic lookups, simple yes/no\n  0.8  Straightforward - short factual questions, simple formatting tasks\n  0.6  Moderate - requires some reasoning or domain knowledge\n  0.4  Complex - multi-step reasoning, code generation, nuanced analysis\n  0.2  Very complex - expert-level, long-form, high-stakes output\n  0.0  Cannot be handled without a powerful model\n\nReturn exactly: {\"CONFIDENCE\": <number between 0 and 1>}",
+    "user_prompt_template": "Evaluate the following prompt and return your confidence that a weak model can handle it well.\n\nPROMPT TO EVALUATE:\n\"\"\"\n{USER_PROMPT}\n\"\"\"\n\nRespond ONLY with: {\"CONFIDENCE\": <0.0 to 1.0>}\n\nIf CONFIDENCE >= 0.70, a weak model will handle it.\nIf CONFIDENCE < 0.70, it will be escalated to a stronger model.",
+    "retry_user_prompt_template": "Return ONLY {\"CONFIDENCE\": <0.0 to 1.0>} for the following prompt.\n\nPROMPT TO EVALUATE:\n\"\"\"\n{USER_PROMPT}\n\"\"\""
   },
   "routes": [
     {
-      "weak_model": "qwen2.5:7b",
-      "strong_model": "qwen2.5:32b",
-      "url": "http://localhost:11434/v1"
-    },
-    {
-      "weak_model": "openai/gpt-4.1-mini",
-      "strong_model": "openai/gpt-4.1",
-      "weak_url": "https://api.openai.com/v1",
-      "strong_url": "https://api.openai.com/v1",
-      "weak_key": "env:OPENAI_API_KEY",
-      "strong_key": "env:OPENAI_API_KEY"
+      "weak_model": "meta/llama-3.2-1b-instruct",
+      "strong_model": "openai/gpt-oss-120b",
+      "url": "https://integrate.api.nvidia.com/v1"
     }
   ]
 }
@@ -154,6 +151,8 @@ Notes:
 - `url` and `key` are shared shorthands for routes where weak and strong models use the same upstream.
 - If `weak_key` or `strong_key` is omitted, ooProxy falls back to `key`, then to any matching entry in `~/.ooProxy/keys.json`.
 - If your NVIDIA or other upstream keys are already stored in `~/.ooProxy/keys.json`, you can omit all key fields from `cascade.json` entirely.
+- `decision.system_prompt`, `decision.user_prompt_template`, and `decision.retry_user_prompt_template` control the routing prompts without requiring code changes.
+- Prompt templates support placeholder tokens: `{USER_PROMPT}`, `{WEAK_MODEL}`, `{STRONG_MODEL}`, `{AVAILABLE_TOOLS}`, `{TOOL_CHOICE}`, and `{REQUEST_JSON}`.
 - `/v1/models`, `/api/tags`, and `/api/show` expose only the configured weak models in cascade mode.
 - If the weak-model routing decision fails or the weak upstream request fails before a response starts, ooProxy falls back to the configured strong model internally.
 

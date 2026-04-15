@@ -95,6 +95,16 @@ Global flags available to all CLI commands:
 - `-j, --json` — emit JSON envelopes from CLI commands
 - `-v, --verbose` — show more detail in CLI output and server logs
 - `-d, --debug` — enable debug logging (implies `--verbose`)
+- `--version` — print the ooProxy release version (`v1.0`)
+
+Bundled tool scripts expose the same release tag:
+
+```bash
+python ooproxy.py --version
+python tools/ooproxy_chat.py --version
+python tools/ooproxy_list_models.py --version
+python tools/ooproxy_keys.py --version
+```
 
 If `--key` and `OPENAI_API_KEY` are both omitted, ooProxy looks up a stored key in `~/.ooProxy/keys.json` using the host portion of the remote URL.
 

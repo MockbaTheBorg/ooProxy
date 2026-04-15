@@ -13,11 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import requests
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.key_binding import KeyBindings
+
+from ooproxy_version import cli_version
 
 # These three are rewritten by _init_session_paths() before anything else runs.
 CONTEXT_FILE = ""
@@ -2438,9 +2444,10 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
         except Exception as e:
             print(f"\n❌ Error: {e}")
 
-def main():
+def main(argv: list[str] | None = None):
     _capture_launch_command_prefix()
     parser = argparse.ArgumentParser(description="Chat with Ollama models via CLI.")
+    parser.add_argument("--version", action="version", version=cli_version("ooproxy_chat"))
     parser.add_argument("model", help="The model name to use (e.g., llama3.2)")
     parser.add_argument("-o", "--openai", action="store_true", help="Use OpenAI compatible API endpoint")
     parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Hostname or IP address of the Ollama server (default: localhost)")
@@ -2455,7 +2462,7 @@ def main():
     parser.add_argument("--no-tools", action="store_true", help="Disable local tool definitions for this session")
     parser.add_argument("--render-mode", choices=list(RENDER_MODES), default=DEFAULT_RENDER_MODE, help="How assistant replies are shown: buffered markdown view, live raw stream, or hybrid stream-then-markdown.")
     parser.add_argument("--guardrails", choices=["confirm-destructive", "read-only", "off"], default=DEFAULT_GUARDRAILS_MODE, help="How destructive tool calls are handled.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     configure_tool_registry(args.tools)
 

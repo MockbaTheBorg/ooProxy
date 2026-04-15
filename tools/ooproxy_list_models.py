@@ -1,6 +1,14 @@
 import requests
 import argparse
+import sys
+from pathlib import Path
 from typing import List, Dict
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from ooproxy_version import cli_version
 
 def list_ollama_models(base_url: str, use_openai: bool) -> List[Dict]:
     """
@@ -27,13 +35,14 @@ def list_ollama_models(base_url: str, use_openai: bool) -> List[Dict]:
         print(f"❌ Error: {e}")
         return []
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="List available models from an Ollama-compatible server.")
+    parser.add_argument("--version", action="version", version=cli_version("ooproxy_list_models"))
     parser.add_argument("model", nargs="?", default="", help="Ignored (kept for CLI compatibility with ooproxy_chat.py)")
     parser.add_argument("-o", "--openai", action="store_true", help="Use OpenAI compatible API endpoint")
     parser.add_argument("-H", "--host", default="localhost", help="Hostname or IP address of the Ollama server (default: localhost)")
     parser.add_argument("-P", "--port", default="11434", help="Port of the Ollama server (default: 11434)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     base_url = f"http://{args.host}:{args.port}"
 

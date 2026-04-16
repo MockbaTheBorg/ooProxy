@@ -34,14 +34,20 @@ def _colorize(text: str, color: str) -> str:
 def _has_tool_continuation(messages: object) -> bool:
     if not isinstance(messages, list):
         return False
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        if message.get("role") == "tool":
-            return True
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, list) and tool_calls:
-            return True
+    if not messages:
+        return False
+
+    last_message = messages[-1]
+    if not isinstance(last_message, dict):
+        return False
+
+    if last_message.get("role") == "tool":
+        return True
+
+    tool_calls = last_message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        return True
+
     return False
 
 

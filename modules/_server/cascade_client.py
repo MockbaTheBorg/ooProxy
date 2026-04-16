@@ -23,6 +23,12 @@ _ANSI_RED = "\033[31m"
 _ANSI_CYAN = "\033[36m"
 
 
+def _colorize(text: str, color: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{color}{text}{_ANSI_RESET}"
+
+
 def _has_tool_continuation(messages: object) -> bool:
     if not isinstance(messages, list):
         return False
@@ -97,14 +103,19 @@ def _supports_color() -> bool:
 def _format_confidence(value: float | None, threshold: float, *, state: str = "parsed") -> str:
     if value is None:
         label = "unparsed" if state == "failed" else state
-        if not _supports_color():
-            return label
-        return f"{_ANSI_YELLOW}{label}{_ANSI_RESET}"
+        return _colorize(label, _ANSI_YELLOW)
     text = f"{value:.2f}"
-    if not _supports_color():
-        return text
     color = _ANSI_GREEN if value >= threshold else _ANSI_RED
-    return f"{color}{text}{_ANSI_RESET}"
+    return _colorize(text, color)
+
+
+def _format_route_target(target: str) -> str:
+    color = _ANSI_GREEN if target == "weak" else _ANSI_YELLOW
+    return _colorize(target, color)
+
+
+def _format_model_name(model: str) -> str:
+    return _colorize(model, _ANSI_CYAN)
 
 
 class _RewrittenStream:
@@ -260,8 +271,9 @@ class CascadeClient:
         confidence_text = _format_confidence(None, self._config.decision.threshold, state="skipped")
         if _has_tool_continuation(body.get("messages")):
             logger.info(
-                "cascade route selected target=weak model=%s confidence=%s reason=tool continuation",
-                route.weak_model,
+                "cascade route selected target=%s model=%s confidence=%s reason=tool continuation",
+                _format_route_target("weak"),
+                _format_model_name(route.weak_model),
                 confidence_text,
             )
             return "weak"
@@ -300,14 +312,16 @@ class CascadeClient:
                 )
                 if target == "weak":
                     logger.info(
-                        "cascade route selected target=weak model=%s confidence=%s",
-                        route.weak_model,
+                        "cascade route selected target=%s model=%s confidence=%s",
+                        _format_route_target("weak"),
+                        _format_model_name(route.weak_model),
                         confidence_text,
                     )
                     return "weak"
                 logger.info(
-                    "cascade route selected target=strong model=%s confidence=%s reason=%s",
-                    route.strong_model,
+                    "cascade route selected target=%s model=%s confidence=%s reason=%s",
+                    _format_route_target("strong"),
+                    _format_model_name(route.strong_model),
                     confidence_text,
                     "confidence below threshold",
                 )
@@ -321,8 +335,9 @@ class CascadeClient:
                     exc,
                 )
         logger.warning(
-            "cascade route selected target=strong model=%s confidence=%s reason=decision failure or low confidence",
-            route.strong_model,
+            "cascade route selected target=%s model=%s confidence=%s reason=decision failure or low confidence",
+            _format_route_target("strong"),
+            _format_model_name(route.strong_model),
             _format_confidence(None, self._config.decision.threshold, state="failed"),
         )
         return "strong"
@@ -355,11 +370,9 @@ class CascadeClient:
 
         if preferred == "weak":
             try:
-                logger.info("cascade opening stream target=weak model=%s", route.weak_model)
                 return _RewrittenStream(await weak_client.open_stream_chat(weak_body), client_model)
             except Exception as exc:
                 logger.warning("cascade weak stream failed for %s; retrying strong: %s", client_model, exc)
-        logger.info("cascade opening stream target=strong model=%s", route.strong_model)
         return _RewrittenStream(await strong_client.open_stream_chat(strong_body), client_model)
 
     async def probe_ready(self) -> tuple[bool, str | None]:

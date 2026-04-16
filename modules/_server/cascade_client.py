@@ -21,6 +21,8 @@ _ANSI_GREEN = "\033[32m"
 _ANSI_YELLOW = "\033[33m"
 _ANSI_RED = "\033[31m"
 _ANSI_CYAN = "\033[36m"
+_DECISION_REASONING_NONE_PROFILE_IDS = frozenset({"openrouter"})
+_DECISION_REASONING_NONE_HOST_SUFFIXES = ("api.openai.com",)
 
 
 def _colorize(text: str, color: str) -> str:
@@ -118,6 +120,26 @@ def _format_model_name(model: str) -> str:
     return _colorize(model, _ANSI_CYAN)
 
 
+def _decision_reasoning_config(reasoning_effort: str | None, client: object) -> dict | None:
+    effort = str(reasoning_effort or "").strip().lower()
+    if not effort:
+        return None
+
+    if effort != "none":
+        return {"effort": effort}
+
+    profile = getattr(client, "endpoint_profile", None)
+    profile_id = str(getattr(profile, "id", "") or "").strip().lower()
+    if profile_id in _DECISION_REASONING_NONE_PROFILE_IDS:
+        return {"effort": "none"}
+
+    base_url = str(getattr(client, "_base", "") or "").strip().lower()
+    if any(host in base_url for host in _DECISION_REASONING_NONE_HOST_SUFFIXES):
+        return {"effort": "none"}
+
+    return None
+
+
 class _RewrittenStream:
     def __init__(self, upstream, client_model: str) -> None:
         self._upstream = upstream
@@ -190,6 +212,7 @@ class CascadeClient:
         return updated
 
     def _decision_body(self, body: dict, route: CascadeRouteConfig, *, compact: bool = False, max_tokens: int | None = None) -> dict:
+        weak_client = self._client_for(route.weak_url, route.weak_key)
         decision_input = {key: value for key, value in body.items() if key not in {"stream", "stream_options"}}
         tool_summary = _summarize_tools(decision_input.get("tools"))
         tool_choice_text = json.dumps(decision_input.get("tool_choice"), ensure_ascii=False, sort_keys=True) if decision_input.get("tool_choice") is not None else "none"
@@ -208,7 +231,7 @@ class CascadeClient:
             tool_choice=tool_choice_text,
             request_json=request_json_text,
         )
-        return {
+        request_body = {
             "model": route.weak_model,
             "messages": [
                 {"role": "system", "content": self._config.decision.system_prompt},
@@ -219,6 +242,10 @@ class CascadeClient:
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens if max_tokens is not None else self._config.decision.max_tokens,
         }
+        reasoning = _decision_reasoning_config(self._config.decision.reasoning_effort, weak_client)
+        if reasoning is not None:
+            request_body["reasoning"] = reasoning
+        return request_body
 
     def _decision_text(self, payload: dict) -> str:
         choices = payload.get("choices") or []

@@ -84,6 +84,7 @@ class CascadeDecisionConfig:
     system_prompt: str = _DEFAULT_CASCADE_SYSTEM_PROMPT
     user_prompt_template: str = _DEFAULT_CASCADE_USER_PROMPT_TEMPLATE
     retry_user_prompt_template: str = _DEFAULT_CASCADE_RETRY_USER_PROMPT_TEMPLATE
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,9 @@ def load_cascade_config(path: Path | None = None) -> ProxyConfig:
         system_prompt=str(decision_raw.get("system_prompt") or CascadeDecisionConfig.system_prompt),
         user_prompt_template=str(decision_raw.get("user_prompt_template") or CascadeDecisionConfig.user_prompt_template),
         retry_user_prompt_template=str(decision_raw.get("retry_user_prompt_template") or CascadeDecisionConfig.retry_user_prompt_template),
+        reasoning_effort=(
+            str(decision_raw.get("reasoning_effort") or "").strip() or None
+        ),
     )
 
     routes_raw = raw.get("routes")

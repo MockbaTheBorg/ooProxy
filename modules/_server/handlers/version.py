@@ -13,4 +13,4 @@ async def version_handler(request: Request) -> JSONResponse:
 
 
 async def root_handler(request: Request) -> PlainTextResponse:
-    return PlainTextResponse("Ollama is running")
+    return PlainTextResponse("ooProxy is running")

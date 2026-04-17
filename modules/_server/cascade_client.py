@@ -217,8 +217,11 @@ class CascadeClient:
         updated["model"] = model
         return updated
 
-    def _decision_body(self, body: dict, route: CascadeRouteConfig, *, compact: bool = False, max_tokens: int | None = None) -> dict:
-        weak_client = self._client_for(route.weak_url, route.weak_key)
+    def _decision_body(self, body: dict, route: CascadeRouteConfig, *, compact: bool = False, max_tokens: int | None = None, decision_model: str | None = None, decision_client: object | None = None) -> dict:
+        # decision_client/decision_model may be provided (arbiter); default to weak (legacy)
+        if decision_client is None:
+            decision_client = self._client_for(route.weak_url, route.weak_key)
+        decision_model = decision_model or route.weak_model
         decision_input = {key: value for key, value in body.items() if key not in {"stream", "stream_options"}}
         tool_summary = _summarize_tools(decision_input.get("tools"))
         tool_choice_text = json.dumps(decision_input.get("tool_choice"), ensure_ascii=False, sort_keys=True) if decision_input.get("tool_choice") is not None else "none"
@@ -238,7 +241,7 @@ class CascadeClient:
             request_json=request_json_text,
         )
         request_body = {
-            "model": route.weak_model,
+            "model": decision_model,
             "messages": [
                 {"role": "system", "content": self._config.decision.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -248,7 +251,7 @@ class CascadeClient:
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens if max_tokens is not None else self._config.decision.max_tokens,
         }
-        reasoning = _decision_reasoning_config(self._config.decision.reasoning_effort, weak_client)
+        reasoning = _decision_reasoning_config(self._config.decision.reasoning_effort, decision_client)
         if reasoning is not None:
             request_body["reasoning"] = reasoning
         return request_body
@@ -311,9 +314,17 @@ class CascadeClient:
             )
             return "weak"
 
-        weak_client = self._client_for(route.weak_url, route.weak_key)
+        # If arbiter is configured for this route, use it for decision probes.
+        use_arbiter = bool(route.arbiter_model)
+        if use_arbiter:
+            decision_client = self._client_for(route.arbiter_url, route.arbiter_key)
+            decision_model = route.arbiter_model
+        else:
+            decision_client = self._client_for(route.weak_url, route.weak_key)
+            decision_model = route.weak_model
+
         decision_attempts = (
-            ("primary", self._decision_body(body, route)),
+            ("primary", self._decision_body(body, route, decision_model=decision_model, decision_client=decision_client)),
             (
                 "retry",
                 self._decision_body(
@@ -321,13 +332,16 @@ class CascadeClient:
                     route,
                     compact=True,
                     max_tokens=max(_DECISION_RETRY_MAX_TOKENS, self._config.decision.max_tokens),
+                    decision_model=decision_model,
+                    decision_client=decision_client,
                 ),
             ),
         )
+
         for attempt_name, decision_body in decision_attempts:
             try:
                 decision_payload = await asyncio.wait_for(
-                    weak_client.chat(decision_body),
+                    decision_client.chat(decision_body),
                     timeout=self._config.decision.timeout_seconds,
                 )
                 confidence, reason = self._parse_decision_from_payload(decision_payload)
@@ -360,6 +374,21 @@ class CascadeClient:
                 )
                 return "strong"
             except Exception as exc:
+                # If we were calling an arbiter, treat this as 'arbiter unreachable' and apply configured fallback.
+                if use_arbiter:
+                    fallback = self._config.decision.arbiter_unreachable_fallback
+                    logger.warning(
+                        "cascade arbiter unreachable route=%s arbiter=%s fallback=%s reason=%s",
+                        route.weak_model,
+                        route.arbiter_model or route.arbiter_url,
+                        fallback,
+                        exc,
+                    )
+                    if fallback == "weak":
+                        logger.info("cascade arbiter fallback selected target=%s model=%s", _format_route_target("weak"), _format_model_name(route.weak_model))
+                        return "weak"
+                    logger.info("cascade arbiter fallback selected target=%s model=%s", _format_route_target("strong"), _format_model_name(route.strong_model))
+                    return "strong"
                 logger.warning(
                     "cascade decision %s attempt failed for %s confidence=%s: %s",
                     attempt_name,
@@ -367,6 +396,7 @@ class CascadeClient:
                     _format_confidence(None, self._config.decision.threshold, state="failed"),
                     exc,
                 )
+
         logger.warning(
             "cascade route selected target=%s model=%s confidence=%s reason=decision failure or low confidence",
             _format_route_target("strong"),
@@ -411,7 +441,15 @@ class CascadeClient:
     async def probe_ready(self) -> tuple[bool, str | None]:
         checked: set[tuple[str, str]] = set()
         for route in self._config.routes:
-            for url, key in ((route.weak_url, route.weak_key), (route.strong_url, route.strong_key)):
+            candidates = [
+                (route.weak_url, route.weak_key),
+                (route.strong_url, route.strong_key),
+            ]
+            if getattr(route, "arbiter_model", None):
+                candidates.append((route.arbiter_url, route.arbiter_key))
+            for url, key in candidates:
+                if not url:
+                    continue
                 cache_key = (url, key)
                 if cache_key in checked:
                     continue

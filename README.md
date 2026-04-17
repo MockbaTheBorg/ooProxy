@@ -1,8 +1,8 @@
 # ooProxy
 
-A lightweight proxy that impersonates an [Ollama](https://ollama.com/) server locally while forwarding requests to any remote OpenAI-compatible API backend (NVIDIA NIM, OpenAI, Groq, Together AI, OpenRouter, local Ollama, etc.).
+A lightweight proxy that emulates a running Ollama server locally while forwarding requests to any remote OpenAI-compatible API backend (NVIDIA NIM, OpenAI, Groq, Together AI, OpenRouter, local model servers, etc.).
 
-This lets you use tools that are hardcoded to talk to Ollama — such as **VS Code Copilot Chat** — with cloud-hosted models, without modifying the client.
+This lets you use tools that are hardcoded to talk to an Ollama-compatible local API — such as **VS Code Copilot Chat** — with cloud-hosted models, without modifying the client.
 
 ---
 
@@ -10,18 +10,18 @@ This lets you use tools that are hardcoded to talk to Ollama — such as **VS Co
 
 ```
 VS Code Copilot Chat
-  (Ollama @ localhost:11434)
-         │
-         ▼
+  (local server @ localhost:11434)
+    │
+    ▼
       ooProxy
-  translates Ollama ↔ OpenAI format
-         │
-         ▼
+  translates local-server ↔ OpenAI format
+    │
+    ▼
   Remote OpenAI-compatible API
   (NVIDIA NIM, OpenAI, Groq, …)
 ```
 
-ooProxy listens on `localhost:11434` and exposes the Ollama-native endpoints used by VS Code and Open WebUI (`/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`) plus OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, `/v1/responses`) and an Anthropic-compatible bridge at `/v1/messages`. It translates requests to OpenAI format where needed, forwards them to the configured remote backend, and translates the responses back — including streaming.
+ooProxy listens on `localhost:11434` and exposes native local model-server endpoints used by some clients (`/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`) plus OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, `/v1/responses`) and an Anthropic-compatible bridge at `/v1/messages`. It translates requests to OpenAI format where needed, forwards them to the configured remote backend, and translates the responses back — including streaming.
 
 ---
 
@@ -79,7 +79,7 @@ Health and readiness endpoints are also available:
 
 - `GET /healthz` — process liveness
 - `GET /readyz` — upstream readiness based on the active endpoint profile
-- `GET /api/status` — Ollama-style readiness endpoint used by some clients
+- `GET /api/status` — readiness endpoint used by some clients
 
 #### Options
 
@@ -148,16 +148,22 @@ Example `~/.ooProxy/cascade.json`:
 ```
 
 Notes:
+Notes:
 
-- `url` and `key` are shared shorthands for routes where weak and strong models use the same upstream.
-- If `weak_key` or `strong_key` is omitted, ooProxy falls back to `key`, then to any matching entry in `~/.ooProxy/keys.json`.
-- If your NVIDIA or other upstream keys are already stored in `~/.ooProxy/keys.json`, you can omit all key fields from `cascade.json` entirely.
-- `decision.reasoning_effort` is forwarded on the internal weak-model routing probe when the upstream/provider is known to support it. In particular, `"none"` is treated as a true disable signal only for known-supported providers such as OpenRouter and OpenAI-compatible OpenAI endpoints; otherwise ooProxy omits the `reasoning` field rather than sending a maybe-invalid off value.
-- For NVIDIA NIM routes, setting `decision.reasoning_effort` to `"none"` causes ooProxy to omit the `reasoning` field on the routing probe entirely. This keeps the weak/strong selection call free of explicit reasoning controls while normal model requests still pass through unchanged.
-- `decision.system_prompt`, `decision.user_prompt_template`, and `decision.retry_user_prompt_template` control the routing prompts without requiring code changes.
-- Prompt templates support placeholder tokens: `{USER_PROMPT}`, `{WEAK_MODEL}`, `{STRONG_MODEL}`, `{AVAILABLE_TOOLS}`, `{TOOL_CHOICE}`, and `{REQUEST_JSON}`.
-- `/v1/models`, `/api/tags`, and `/api/show` expose only the configured weak models in cascade mode.
-- If the weak-model routing decision fails or the weak upstream request fails before a response starts, ooProxy falls back to the configured strong model internally.
+- Roles: cascade mode uses three distinct roles — `weak`, `strong`, and an optional `arbiter`.
+  - The `weak` role is the fast/cheap model that clients see by default.
+  - The `strong` role is the higher-capability fallback for harder prompts.
+  - The `arbiter` role (when configured) only receives routing probes and must not execute user tasks; it only decides which model should handle a request.
+
+- Per-role endpoints and keys: each role can point to a different upstream endpoint and use its own API key. You may provide a single `url` as shorthand when all roles share the same upstream, but there is no shared `key` shorthand — keys must be supplied per-role (`weak_key`, `strong_key`, and optionally `arbiter_key`) or stored in `~/.ooProxy/keys.json` keyed by the endpoint URL.
+
+- Routing prompts and reasoning: `decision.system_prompt`, `decision.user_prompt_template`, and `decision.retry_user_prompt_template` control the arbiter/routing prompts. The `decision.reasoning_effort` setting is forwarded only when the upstream supports it; for providers that do not accept an explicit `none` value, ooProxy omits the `reasoning` field.
+
+- Arbiter reachability and fallback: if an `arbiter_model` is configured but the arbiter is unreachable, ooProxy logs a warning and applies the `decision.arbiter_unreachable_fallback` policy (`weak` or `strong`, default `strong`).
+
+- Behavior and safety: when the routing probe or the weak upstream fails before producing a response, ooProxy internally falls back to the configured `strong` role so clients still receive an answer. In cascade mode, model-listing and show endpoints surface only the configured weak models to clients.
+
+- Prompt template tokens: templates may include `{USER_PROMPT}`, `{WEAK_MODEL}`, `{STRONG_MODEL}`, `{AVAILABLE_TOOLS}`, `{TOOL_CHOICE}`, and `{REQUEST_JSON}`.
 
 ---
 
@@ -286,9 +292,9 @@ Example tool file:
 }
 ```
 
-Command-backed tools receive the tool arguments on stdin as a JSON object and in the `OLLAMA_TOOL_ARGS` environment variable.
+Command-backed tools receive the tool arguments on stdin as a JSON object and in the `OOPROXY_TOOL_ARGS` environment variable.
 
-External tool processes also receive `OLLAMA_TOOL_CWD`, so relative paths can resolve against the active chat working directory.
+External tool processes also receive `OOPROXY_TOOL_CWD`, so relative paths can resolve against the active chat working directory.
 
 Built-in guardrails are enabled by default in `tools/ooproxy_chat.py` with `--guardrails confirm-destructive`.
 
@@ -310,25 +316,7 @@ Other useful options:
 - `-o, --openai` — talk to the proxy through `/v1/chat/completions` instead of `/api/chat`
 - `--no-tools` — disable all local tool definitions for the session
 - `--render-mode markdown|stream|hybrid` — control how assistant output is rendered in the terminal
-- `-H, --host` / `-P, --port` — point the tool at a different ooProxy or Ollama endpoint
-
-### ooproxy_chat regression test
-
-There is also an end-to-end regression script for the interactive tool-calling flow:
-
-```bash
-python tools/test_ollama_chat_e2e.py --model openai/gpt-oss-120b
-```
-
-By default it tests both the native `/api/chat` path and the OpenAI-compatible `/v1/chat/completions` path against an already running proxy.
-
-To let the script start and stop its own proxy instance, pass a command such as:
-
-```bash
-python tools/test_ollama_chat_e2e.py \
-  --model openai/gpt-oss-120b \
-  --proxy-command './start.sh'
-```
+- `-H, --host` / `-P, --port` — point the tool at a different ooProxy or upstream endpoint
 
 ---
 
@@ -356,19 +344,19 @@ python ooproxy.py -s --url https://integrate.api.nvidia.com/v1 --key nvapi-...
 python tools/ooproxy_keys.py --host integrate.api.nvidia.com --key nvapi-...
 python ooproxy.py -s
 
-# Local Ollama used as the upstream backend
+# Local model server used as the upstream backend
 python ooproxy.py -s --url http://localhost:11434/v1
 ```
 
-ooProxy also ships static endpoint profiles in `endpoints/*.json` for known providers, currently including NVIDIA NIM, OpenRouter, Together AI, Fireworks AI, and local Ollama. For the endpoint profile schema and the process for researching or implementing a new provider profile, see `endpoints/endpoints.md`.
+ooProxy also ships static endpoint profiles in `endpoints/*.json` for known providers, currently including NVIDIA NIM, OpenRouter, Together AI, Fireworks AI, and local model servers. For the endpoint profile schema and the process for researching or implementing a new provider profile, see `endpoints/endpoints.md`.
 
 ---
 
 ## VS Code Copilot Chat setup
 
 1. Install the [GitHub Copilot Chat](https://marketplace.visualstudio.com/items?itemName=GitHub.copilot-chat) extension.
-2. Open VS Code settings and configure Ollama as the provider:
-   - Set the Ollama endpoint to `http://localhost:11434`
+2. Open VS Code settings and configure the local model-server endpoint as the provider:
+  - Set the endpoint to `http://localhost:11434`
 3. Start ooProxy pointing at your preferred backend.
 4. Open Copilot Chat — the model list will be populated from the remote API.
 5. Select a model and chat.
@@ -414,8 +402,8 @@ ooProxy automatically handles backend-specific quirks without requiring any conf
 - **Message alternation** — Some models require strict `user/assistant/user/assistant` alternation. ooProxy collapses consecutive same-role messages on retry.
 - **Learned model behavior cache** — ooProxy records per-endpoint/model quirks in `~/.ooProxy/behavior.json`, including request-side retry flags and response-shape quirks such as embedded textual tool calls.
 - **Vendor field stripping** — Backend-specific response fields (e.g. NVIDIA's `nvext`) are stripped before the response is returned to the client.
-- **Assistant-shaped upstream errors** — Upstream API errors are converted into normal assistant replies or stream events on the Ollama, OpenAI Responses, and Anthropic-compatible surfaces so clients still receive a valid protocol response.
-- **Reasoning-to-Ollama translation** — OpenAI-style `reasoning_content` is translated into Ollama-visible `<think>...</think>` blocks, including streaming.
+-- **Assistant-shaped upstream errors** — Upstream API errors are converted into normal assistant replies or stream events on the local, OpenAI Responses, and Anthropic-compatible surfaces so clients still receive a valid protocol response.
+-- **Reasoning translation for local clients** — OpenAI-style `reasoning_content` is translated into local-client-visible `<think>...</think>` blocks, including streaming.
 
 Request retry rules are learned from actual upstream errors; response-shape quirks are learned when a model returns a successful but malformed-compatible response. For backends that behave correctly, requests pass straight through with no transformation.
 
@@ -424,12 +412,12 @@ Request retry rules are learned from actual upstream errors; response-shape quir
 Implemented HTTP routes include:
 
 - Native and health routes: `/`, `/healthz`, `/readyz`, `/api/status`, `/api/version`
-- Ollama-compatible routes: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`
+- Local-compatible routes: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embeddings`, `/api/ps`
 - OpenAI-compatible routes: `/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, `/v1/responses`
 - Anthropic-compatible route: `/v1/messages`
-- Ollama model-management stubs: `/api/pull`, `/api/delete`, `/api/copy`, `/api/create`, `/api/push`, `/api/blobs/{digest}`
+- Model-management stubs: `/api/pull`, `/api/delete`, `/api/copy`, `/api/create`, `/api/push`, `/api/blobs/{digest}`
 
-The model-management endpoints return no-op success responses so Ollama-oriented clients can stay happy even when the remote backend has no equivalent model lifecycle API.
+The model-management endpoints return no-op success responses so clients expecting a model-management surface can stay happy even when the remote backend has no equivalent model lifecycle API.
 
 ---
 

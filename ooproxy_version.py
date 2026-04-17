@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-OO_PROXY_VERSION = "1.0.1"
+OO_PROXY_VERSION = "1.0.2"
 OO_PROXY_VERSION_TAG = f"v{OO_PROXY_VERSION}"
+
+# The compatibility version of the upstream product we emulate. Use the
+# original product-specific name so callers explicitly reference the emulated
+# upstream product version.
 OLLAMA_COMPAT_VERSION = "0.6.5"
 
 

@@ -14,7 +14,14 @@
     {
       "weak_model": "openai/gpt-oss-20b",
       "strong_model": "openai/gpt-oss-120b",
-      "url": "https://integrate.api.nvidia.com/v1"
+      "arbiter_model": "openai/gpt-4-arbiter",
+      "weak_url": "https://weak.example/v1",
+      "strong_url": "https://strong.example/v1",
+      "arbiter_url": "https://arbiter.example/v1",
+      "weak_key": "env:MY_WEAK_KEY",
+      "strong_key": "env:MY_STRONG_KEY",
+      "arbiter_key": "env:MY_ARBITER_KEY",
+      "metadata": {}
     }
   ]
 }

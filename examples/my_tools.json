@@ -74,7 +74,7 @@
         "argv": [
           "python3",
           "-c",
-          "import json,os,sys,pathlib; data=json.load(sys.stdin); base=pathlib.Path(os.environ.get('OLLAMA_TOOL_CWD', os.getcwd())); path=pathlib.Path(data['path']); path = path if path.is_absolute() else (base / path); lines=int(data.get('lines',20)); print(''.join(path.read_text(encoding='utf-8').splitlines(True)[:lines]))"
+          "import json,os,sys,pathlib; data=json.load(sys.stdin); base=pathlib.Path(os.environ.get('OOPROXY_TOOL_CWD', os.getcwd())); path=pathlib.Path(data['path']); path = path if path.is_absolute() else (base / path); lines=int(data.get('lines',20)); print(''.join(path.read_text(encoding='utf-8').splitlines(True)[:lines]))"
         ],
         "cwd": ".",
         "timeout": 30

@@ -321,17 +321,17 @@ Example `argv` tool:
 External tools receive the tool arguments in two ways:
 
 - on stdin as a JSON object
-- in the `OLLAMA_TOOL_ARGS` environment variable as the same JSON string
+- in the `OOPROXY_TOOL_ARGS` environment variable as the same JSON string
 
 External tools also receive:
 
-- `OLLAMA_TOOL_NAME`: the tool name
-- `OLLAMA_TOOL_CWD`: the active chat working directory, which may be different from the subprocess `cwd`
+- `OOPROXY_TOOL_NAME`: the tool name
+- `OOPROXY_TOOL_CWD`: the active chat working directory, which may be different from the subprocess `cwd`
 
 This means a tool can:
 
 - read structured arguments from stdin
-- resolve relative user paths against `OLLAMA_TOOL_CWD`
+-- resolve relative user paths against `OOPROXY_TOOL_CWD`
 - still run from a controlled subprocess `cwd` if needed
 
 ## Output And Error Handling
@@ -410,7 +410,7 @@ This determines `command`, `argv`, and whether a companion script is appropriate
 You need:
 
 - whether the subprocess should run in the repo root, the tool file directory, or the active chat cwd
-- whether user-provided relative paths should resolve against `OLLAMA_TOOL_CWD`
+- whether user-provided relative paths should resolve against `OOPROXY_TOOL_CWD`
 
 This determines `cwd` and how the tool script should interpret paths.
 

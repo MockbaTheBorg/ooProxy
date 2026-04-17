@@ -85,6 +85,7 @@ class CascadeDecisionConfig:
     user_prompt_template: str = _DEFAULT_CASCADE_USER_PROMPT_TEMPLATE
     retry_user_prompt_template: str = _DEFAULT_CASCADE_RETRY_USER_PROMPT_TEMPLATE
     reasoning_effort: str | None = None
+    arbiter_unreachable_fallback: str = "strong"
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,10 @@ class CascadeRouteConfig:
     weak_key: str
     strong_url: str
     strong_key: str
+    # Optional arbiter triple; only used if arbiter_model is provided
+    arbiter_model: str | None = None
+    arbiter_url: str | None = None
+    arbiter_key: str = ""
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -141,11 +146,9 @@ def _resolve_config_secret(raw_value: object) -> str:
     return value
 
 
-def _route_key(url: str, explicit_key: object, shared_key: object, store: ApiKeyStore) -> str:
+def _route_key(url: str, explicit_key: object, store: ApiKeyStore) -> str:
+    # Resolve only an explicit per-route key; do not use a shared 'key' fallback.
     resolved = _resolve_config_secret(explicit_key)
-    if resolved:
-        return resolved
-    resolved = _resolve_config_secret(shared_key)
     if resolved:
         return resolved
     return store.get(endpoint_from_url(url)) or ""
@@ -182,7 +185,11 @@ def load_cascade_config(path: Path | None = None) -> ProxyConfig:
         reasoning_effort=(
             str(decision_raw.get("reasoning_effort") or "").strip() or None
         ),
+        arbiter_unreachable_fallback=str(decision_raw.get("arbiter_unreachable_fallback") or CascadeDecisionConfig.arbiter_unreachable_fallback).strip().lower(),
     )
+
+    if decision.arbiter_unreachable_fallback not in {"weak", "strong"}:
+        raise CommandError("decision.arbiter_unreachable_fallback must be 'weak' or 'strong'", exit_code=2)
 
     routes_raw = raw.get("routes")
     if not isinstance(routes_raw, list) or not routes_raw:
@@ -208,9 +215,16 @@ def load_cascade_config(path: Path | None = None) -> ProxyConfig:
         shared_url = entry.get("url")
         weak_url = _normalize_config_url(entry.get("weak_url") or shared_url, field_name="weak_url")
         strong_url = _normalize_config_url(entry.get("strong_url") or shared_url, field_name="strong_url")
-        shared_key = entry.get("key")
-        weak_key = _route_key(weak_url, entry.get("weak_key"), shared_key, store)
-        strong_key = _route_key(strong_url, entry.get("strong_key"), shared_key, store)
+        # Keys must be explicit per-endpoint or resolvable from ApiKeyStore for that url.
+        weak_key = _route_key(weak_url, entry.get("weak_key"), store)
+        strong_key = _route_key(strong_url, entry.get("strong_key"), store)
+        # Optional arbiter fields (opt-in)
+        arbiter_model = str(entry.get("arbiter_model") or "").strip() or None
+        arbiter_url = None
+        arbiter_key = ""
+        if arbiter_model:
+            arbiter_url = _normalize_config_url(entry.get("arbiter_url") or shared_url, field_name="arbiter_url")
+            arbiter_key = _route_key(arbiter_url, entry.get("arbiter_key"), store)
         metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
 
         routes.append(
@@ -221,6 +235,9 @@ def load_cascade_config(path: Path | None = None) -> ProxyConfig:
                 weak_key=weak_key,
                 strong_url=strong_url,
                 strong_key=strong_key,
+                arbiter_model=arbiter_model,
+                arbiter_url=arbiter_url,
+                arbiter_key=arbiter_key,
                 metadata=dict(metadata),
             )
         )

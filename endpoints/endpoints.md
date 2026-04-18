@@ -69,7 +69,13 @@ All supported top-level items are shown below. Any omitted item falls back to th
     "streaming": "sse",
     "tools": "trial",
     "system_prompt": "supported",
-    "ttfb_timeout": 30
+    "ttfb_timeout": 30,
+    "timeouts": {
+      "connect": 10,
+      "read": 180,
+      "write": 30,
+      "pool": 10
+    }
   },
   "behavior": {
     "strip_stream_options": true,
@@ -390,6 +396,22 @@ Practical guidance:
 - Set this to a lower value for backends that are known to respond quickly over SSE.
 - Set this to a higher value for backends that may take longer to start streaming but do eventually send events.
 - Omit the field to use the global default (30s).
+
+#### `chat.timeouts`
+
+- Type: object with numeric fields `connect`, `read`, `write`, `pool` (seconds)
+- Required: no
+- Default: `{ "connect": 10, "read": 180, "write": 30, "pool": 10 }`
+- Purpose: configure the per-endpoint HTTP client timeouts used when talking to the upstream API. These are the defaults applied when creating the `httpx.AsyncClient` for requests and streaming.
+
+Practical guidance:
+
+- `connect`: how long to wait to establish a TCP/TLS connection
+- `read`: maximum time to wait for response read operations
+- `write`: maximum time allowed for sending request body
+- `pool`: maximum time to wait for acquiring a connection from the pool
+
+Omit the field to use the global defaults shown above, or override individual keys as needed.
 
 ### `behavior`
 

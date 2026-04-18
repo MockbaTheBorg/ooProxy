@@ -344,7 +344,16 @@ class OpenAIClient:
         self._headers: dict[str, str] = (
             {"Authorization": f"Bearer {config.key}"} if config.key else {}
         )
-        self._client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
+        # Allow per-endpoint override of default httpx timeouts
+        if self.endpoint_profile is None:
+            timeout = _TIMEOUT
+        else:
+            connect = self.endpoint_profile.timeout_connect if getattr(self.endpoint_profile, "timeout_connect", None) is not None else 10.0
+            read = self.endpoint_profile.timeout_read if getattr(self.endpoint_profile, "timeout_read", None) is not None else 180.0
+            write = self.endpoint_profile.timeout_write if getattr(self.endpoint_profile, "timeout_write", None) is not None else 30.0
+            pool = self.endpoint_profile.timeout_pool if getattr(self.endpoint_profile, "timeout_pool", None) is not None else 10.0
+            timeout = httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+        self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
         if self.endpoint_profile is not None:
             logger.info("endpoint profile: using %s for %s", self.endpoint_profile.id, self._base)
 

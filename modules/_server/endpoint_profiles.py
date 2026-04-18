@@ -72,6 +72,11 @@ class EndpointProfile:
     chat_system_prompt: str = "supported"
     # Seconds to wait for first streaming byte (TTFB). If None, use global default.
     ttfb_timeout: float | None = None
+    # Optional per-endpoint HTTP client timeouts (seconds). If None, use global defaults.
+    timeout_connect: float | None = None
+    timeout_read: float | None = None
+    timeout_write: float | None = None
+    timeout_pool: float | None = None
     health_mode: str = "internal-ready"
     health_path: str | None = None
     health_method: str = "GET"
@@ -104,7 +109,7 @@ def _profile_from_json(path: Path, raw: dict[str, Any]) -> EndpointProfile:
     chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
     health = raw.get("health") if isinstance(raw.get("health"), dict) else {}
     behavior = raw.get("behavior") if isinstance(raw.get("behavior"), dict) else {}
-    # parse optional ttfb_timeout from chat section
+    # parse optional ttfb_timeout and timeouts from chat section
     ttfb_timeout_val = None
     if "ttfb_timeout" in chat:
         try:
@@ -112,6 +117,32 @@ def _profile_from_json(path: Path, raw: dict[str, Any]) -> EndpointProfile:
         except (TypeError, ValueError):
             ttfb_timeout_val = None
 
+    timeout_connect_val = None
+    timeout_read_val = None
+    timeout_write_val = None
+    timeout_pool_val = None
+    if isinstance(chat.get("timeouts"), dict):
+        timeouts = chat.get("timeouts") or {}
+        try:
+            if "connect" in timeouts:
+                timeout_connect_val = float(timeouts.get("connect"))
+        except (TypeError, ValueError):
+            timeout_connect_val = None
+        try:
+            if "read" in timeouts:
+                timeout_read_val = float(timeouts.get("read"))
+        except (TypeError, ValueError):
+            timeout_read_val = None
+        try:
+            if "write" in timeouts:
+                timeout_write_val = float(timeouts.get("write"))
+        except (TypeError, ValueError):
+            timeout_write_val = None
+        try:
+            if "pool" in timeouts:
+                timeout_pool_val = float(timeouts.get("pool"))
+        except (TypeError, ValueError):
+            timeout_pool_val = None
     return EndpointProfile(
         id=str(raw.get("id") or path.stem),
         source_path=str(path),
@@ -150,6 +181,10 @@ def _profile_from_json(path: Path, raw: dict[str, Any]) -> EndpointProfile:
         chat_tools=str(chat.get("tools") or "trial").strip().lower(),
         chat_system_prompt=str(chat.get("system_prompt") or "supported").strip().lower(),
         ttfb_timeout=ttfb_timeout_val,
+        timeout_connect=timeout_connect_val,
+        timeout_read=timeout_read_val,
+        timeout_write=timeout_write_val,
+        timeout_pool=timeout_pool_val,
         health_mode=str(health.get("mode") or "internal-ready"),
         health_path=str(health.get("path")) if health.get("path") else None,
         health_method=str(health.get("method") or "GET").upper(),

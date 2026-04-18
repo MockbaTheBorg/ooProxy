@@ -17,7 +17,11 @@
     "path": "chat/completions",
     "streaming": "sse",
     "tools": "trial",
-    "system_prompt": "supported"
+    "system_prompt": "supported",
+    "ttfb_timeout": 90,
+    "timeouts": {
+      "read": 300
+    }
   },
   "behavior": {
     "strip_tool_choice_auto": true

@@ -23,6 +23,7 @@ from modules._server.handlers.openai_compat import (
     v1_chat_handler,
     v1_embeddings_handler,
     v1_messages_handler,
+    v1_messages_count_tokens_handler,
     v1_models_handler,
     v1_responses_handler,
 )
@@ -78,6 +79,7 @@ def _v1_router() -> APIRouter:
     _nr = dict(response_model=None)
     r.add_api_route("/chat/completions", v1_chat_handler,   methods=["POST"], **_nr)
     r.add_api_route("/messages",         v1_messages_handler, methods=["POST"], **_nr)
+    r.add_api_route("/messages/count_tokens", v1_messages_count_tokens_handler, methods=["POST"], **_nr)
     r.add_api_route("/responses",        v1_responses_handler, methods=["POST"], **_nr)
     r.add_api_route("/models",           v1_models_handler,  methods=["GET"],  **_nr)
     r.add_api_route("/embeddings",       v1_embeddings_handler, methods=["POST"], **_nr)

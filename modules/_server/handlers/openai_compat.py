@@ -8,9 +8,11 @@ These are pure pass-through — same format on both sides — so no translation 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -1130,3 +1132,97 @@ async def v1_messages_handler(request: Request) -> StreamingResponse | JSONRespo
     if body.get("stream"):
         return StreamingResponse(_anthropic_synthetic_stream(anthropic_message), media_type="text/event-stream")
     return JSONResponse(anthropic_message)
+
+
+async def v1_messages_count_tokens_handler(request: Request) -> JSONResponse:
+    """POST /v1/messages/count_tokens — lightweight token counting for Anthropic-style messages.
+
+    Returns an approximate token count based on characters (1 token ≈ 4 chars).
+    This is intended to satisfy clients that call the endpoint for UI estimates.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    messages = body.get("messages", [])
+    model = body.get("model")
+
+    def _extract_text(content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    if "text" in item:
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(json.dumps(item, ensure_ascii=False))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        if isinstance(content, dict):
+            return str(content.get("text") or content.get("content") or json.dumps(content, ensure_ascii=False))
+        return str(content)
+
+    # Try tiktoken if available for accurate counts; otherwise fallback to heuristic
+    try:
+        tiktoken = importlib.import_module("tiktoken")
+        # Prefer model-specific encoder when possible, fall back to cl100k_base
+        try:
+            encoder = None
+            if model:
+                try:
+                    encoder = tiktoken.encoding_for_model(model)
+                except Exception:
+                    pass
+            if encoder is None:
+                try:
+                    encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception:
+                    # Last resort: use any available encoding
+                    encoder = tiktoken.get_encoding(next(iter(tiktoken._encoders)))
+        except Exception:
+            encoder = tiktoken.get_encoding("cl100k_base")
+
+        total_tokens = 0
+        for m in messages:
+            text = _extract_text(m.get("content") if isinstance(m, dict) else m)
+            total_tokens += len(encoder.encode(text))
+
+        prompt_tokens = int(total_tokens)
+        completion_tokens = 0
+        return JSONResponse({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated_with": "tiktoken",
+        })
+    except Exception:
+        # Heuristic fallback: combine char-based and word-based estimates with small buffer
+        total_chars = 0
+        total_words = 0
+        for m in messages:
+            text = _extract_text(m.get("content") if isinstance(m, dict) else m)
+            total_chars += len(text)
+            total_words += len(re.findall(r"\w+", text))
+
+        # heuristics: chars/4 and words*1.3, then add 3% buffer
+        import math
+
+        est_from_chars = total_chars / 4.0 if total_chars else 0.0
+        est_from_words = total_words * 1.3 if total_words else 0.0
+        prompt_tokens = int(math.ceil(max(est_from_chars, est_from_words) * 1.03))
+        completion_tokens = 0
+        total_tokens = prompt_tokens + completion_tokens
+        return JSONResponse({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "estimated_with": "heuristic",
+        })

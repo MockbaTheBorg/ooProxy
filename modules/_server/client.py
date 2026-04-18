@@ -8,16 +8,60 @@ import logging
 import random
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncIterator
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
 import httpx
+
+# Optional Prometheus metrics: use if available, otherwise fall back to in-process counters
+_PROMETHEUS_AVAILABLE = True
+try:
+    from prometheus_client import Counter as _PromCounter  # type: ignore
+except Exception:  # ImportError or if package missing
+    _PROMETHEUS_AVAILABLE = False
+    _PromCounter = None  # type: ignore
 
 from modules._server.config import ProxyConfig
 from modules._server.endpoint_profiles import EndpointProfile, resolve_endpoint_profile
 
 logger = logging.getLogger("ooproxy")
+
+# In-process metrics (fallback when Prometheus client is not installed).
+_metrics: dict[str, int] = {
+    "upstream_429_total": 0,
+    "upstream_retry_after_used_total": 0,
+}
+
+# Prometheus counters (created only if prometheus_client is available)
+if _PROMETHEUS_AVAILABLE and _PromCounter is not None:
+    _PROM_UPSTREAM_429 = _PromCounter("ooproxy_upstream_429_total", "Upstream 429 responses")
+    _PROM_RETRY_AFTER_USED = _PromCounter("ooproxy_upstream_retry_after_used_total", "Upstream Retry-After header used")
+else:
+    _PROM_UPSTREAM_429 = None
+    _PROM_RETRY_AFTER_USED = None
+
+
+def _inc_429() -> None:
+    try:
+        if _PROM_UPSTREAM_429 is not None:
+            _PROM_UPSTREAM_429.inc()
+    finally:
+        _metrics["upstream_429_total"] += 1
+
+
+def _inc_retry_after_used() -> None:
+    try:
+        if _PROM_RETRY_AFTER_USED is not None:
+            _PROM_RETRY_AFTER_USED.inc()
+    finally:
+        _metrics["upstream_retry_after_used_total"] += 1
+
+
+def get_metrics() -> dict:
+    """Return a copy of in-process metrics counters."""
+    return dict(_metrics)
 
 # ---------------------------------------------------------------------------
 # Timeouts
@@ -53,11 +97,27 @@ def _backoff_delay(attempt: int, response: httpx.Response | None = None) -> floa
     Otherwise uses exponential back-off with ±10 % jitter.
     """
     if response is not None:
-        after = response.headers.get("Retry-After", "")
-        try:
-            return max(0.0, float(after))
-        except ValueError:
-            pass
+        after = response.headers.get("Retry-After", "").strip()
+        if after:
+            # Retry-After can be either a number of seconds or an HTTP-date.
+            # Try numeric seconds first, then parse an HTTP-date per RFC.
+            try:
+                delay = max(0.0, float(after))
+                _inc_retry_after_used()
+                return delay
+            except ValueError:
+                try:
+                    dt = parsedate_to_datetime(after)
+                    if dt is None:
+                        raise ValueError("unable to parse Retry-After HTTP-date")
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    delay = dt.timestamp() - time.time()
+                    _inc_retry_after_used()
+                    return max(0.0, delay)
+                except Exception:
+                    # Fall through to default backoff if parsing fails
+                    pass
     base = RETRY_BASE_DELAY * (2 ** attempt)
     jitter = base * 0.1 * (2 * random.random() - 1)
     return base + jitter
@@ -460,9 +520,11 @@ class OpenAIClient:
                 latency_ms = (time.perf_counter() - t0) * 1000
                 last_exc = exc
                 if attempt < RETRY_MAX and exc.response.status_code in _RETRY_ON_STATUS:
+                    if exc.response.status_code == 429:
+                        _inc_429()
                     delay = _backoff_delay(attempt, exc.response)
                     logger.warning(
-                        "upstream POST %s status=%d attempt=%d/%.0fs → retry in %.1fs",
+                        "upstream POST %s status=%d attempt=%d/%.0fms → retry in %.1fs",
                         path, exc.response.status_code, attempt + 1, latency_ms, delay,
                     )
                     await asyncio.sleep(delay)
@@ -514,6 +576,8 @@ class OpenAIClient:
                 latency_ms = (time.perf_counter() - t0) * 1000
                 last_exc = exc
                 if attempt < RETRY_MAX and exc.response.status_code in _RETRY_ON_STATUS:
+                    if exc.response.status_code == 429:
+                        _inc_429()
                     delay = _backoff_delay(attempt, exc.response)
                     logger.warning(
                         "upstream stream %s status=%d attempt=%d/%.0fms → retry in %.1fs",

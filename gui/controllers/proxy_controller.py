@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from gui.i18n import t
 from gui.models.proxy_state import ProxyStatus
 from gui.resources import get_python_path, get_ooproxy_script, OOPROXY_KEYS_FILE
 from gui.workers.health_checker import HealthChecker
@@ -65,7 +66,7 @@ class ProxyController(QObject):
     def start_proxy(self, url: str, key: str, port: int = 11434) -> None:
         """Start the proxy server via QProcess."""
         if self._process.is_running():
-            self.log_received.emit("[WARN] Proxy já está rodando.")
+            self.log_received.emit(t("proxy.log.already_running"))
             return
 
         self._url = url
@@ -73,7 +74,7 @@ class ProxyController(QObject):
         self._key = key
 
         self._set_status(ProxyStatus.STARTING)
-        self.log_received.emit(f"Iniciando proxy → {url} (porta {port})")
+        self.log_received.emit(t("proxy.log.starting", url=url, port=port))
 
         python = get_python_path()
         script = get_ooproxy_script()
@@ -91,11 +92,11 @@ class ProxyController(QObject):
         self._url = url
         self._port = port
         self._set_status(ProxyStatus.STARTING)
-        self.log_received.emit("Resolvendo chave DPAPI…")
+        self.log_received.emit(t("proxy.log.resolving_dpapi"))
 
         encrypted = self._read_dpapi_encrypted_key(url)
         if not encrypted:
-            self.log_received.emit("[INFO] Chave DPAPI não encontrada. Iniciando proxy (fallback via keys.json ativado)...")
+            self.log_received.emit(t("proxy.log.dpapi_not_found"))
             self.start_proxy(self._url, "", self._port)
             return
 
@@ -116,17 +117,17 @@ class ProxyController(QObject):
         if not self._process.is_running():
             return
         self._set_status(ProxyStatus.STOPPING)
-        self.log_received.emit("Parando proxy…")
+        self.log_received.emit(t("proxy.log.stopping"))
         self._process.stop(timeout_ms=5000)
 
     def install_startup(self) -> None:
         """Register the ooProxy scheduled task via PowerShell."""
         from gui.resources import get_ps1_script
-        self.log_received.emit("Registrando auto-start no Windows…")
+        self.log_received.emit(t("proxy.log.registering_autostart"))
         runner = PowerShellRunner(self)
         runner.finished.connect(
             lambda ok, out, err: self.log_received.emit(
-                f"[OK] Auto-start registrado." if ok else f"[ERRO] {err}"
+                t("proxy.log.autostart_ok") if ok else t("proxy.log.autostart_error", error=err)
             )
         )
         runner.run_script(get_ps1_script(), ["-Install"])
@@ -134,11 +135,11 @@ class ProxyController(QObject):
     def uninstall_startup(self) -> None:
         """Remove the ooProxy scheduled task via PowerShell."""
         from gui.resources import get_ps1_script
-        self.log_received.emit("Removendo auto-start…")
+        self.log_received.emit(t("proxy.log.removing_autostart"))
         runner = PowerShellRunner(self)
         runner.finished.connect(
             lambda ok, out, err: self.log_received.emit(
-                f"[OK] Auto-start removido." if ok else f"[ERRO] {err}"
+                t("proxy.log.autostart_removed") if ok else t("proxy.log.autostart_error", error=err)
             )
         )
         runner.run_script(get_ps1_script(), ["-Uninstall"])
@@ -193,7 +194,7 @@ class ProxyController(QObject):
             pass
 
         if not ok or not stdout.strip():
-            self.log_received.emit(f"[ERRO] Falha ao decriptar chave DPAPI: {stderr}")
+            self.log_received.emit(t("proxy.log.dpapi_error", error=stderr))
             self._set_status(ProxyStatus.ERROR)
             return
 
@@ -215,23 +216,23 @@ class ProxyController(QObject):
         self.log_received.emit(text)
 
     def _on_process_started(self) -> None:
-        self.log_received.emit("Processo do proxy iniciado.")
+        self.log_received.emit(t("proxy.log.process_started"))
 
     def _on_process_finished(self, exit_code: int, exit_status: str) -> None:
         if exit_status == "CrashExit" or exit_code != 0:
-            self.log_received.emit(f"[ERRO] Proxy encerrado (code={exit_code}, status={exit_status})")
+            self.log_received.emit(t("proxy.log.process_crashed", code=exit_code, status=exit_status))
             self._set_status(ProxyStatus.ERROR)
         else:
-            self.log_received.emit("Proxy encerrado normalmente.")
+            self.log_received.emit(t("proxy.log.process_stopped"))
             self._set_status(ProxyStatus.STOPPED)
 
     def _on_health_changed(self, alive: bool) -> None:
         """React to health-check transitions."""
         if alive and self._status in (ProxyStatus.STARTING, ProxyStatus.CHECKING, ProxyStatus.UNKNOWN):
             self._set_status(ProxyStatus.RUNNING)
-            self.log_received.emit("Health-check: proxy está respondendo ✓")
+            self.log_received.emit(t("proxy.log.health_ok"))
         elif not alive and self._status == ProxyStatus.RUNNING:
             # Proxy was running but stopped responding
             if not self._process.is_running():
                 self._set_status(ProxyStatus.STOPPED)
-                self.log_received.emit("Health-check: proxy parou de responder.")
+                self.log_received.emit(t("proxy.log.health_down"))

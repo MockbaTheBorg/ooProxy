@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from gui.i18n import t
 from gui.models.tool_info import ToolInfo, enrich_tool_info
 from gui.resources import get_tool_scripts
 from gui.workers.tool_runner import ToolRunner
@@ -30,7 +31,7 @@ class ToolsController(QObject):
     def discover(self) -> None:
         """Scan the tools/ directory and emit discovered tools."""
         raw_tools = get_tool_scripts()
-        self._tools = [enrich_tool_info(t) for t in raw_tools]
+        self._tools = [enrich_tool_info(ti) for ti in raw_tools]
         self.tools_discovered.emit(self._tools)
 
     def run_tool(self, tool: ToolInfo, args: list[str] | None = None) -> None:
@@ -41,7 +42,7 @@ class ToolsController(QObject):
 
         # Run inline with captured output
         if self._active_runner is not None and self._active_runner.is_running():
-            self.tool_error.emit(tool.name, "Outra ferramenta já está em execução.")
+            self.tool_error.emit(tool.name, t("tools.already_running"))
             return
 
         self._active_tool_name = tool.name

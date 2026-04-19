@@ -53,7 +53,7 @@ def _load_locale(locale_code: str) -> dict[str, str]:
 def _detect_system_locale() -> str:
     """Detect the system locale and map to our supported locales."""
     try:
-        sys_locale = _locale.getdefaultlocale()[0] or "en_US"
+        sys_locale = _locale.getlocale()[0] or "en_US"
     except Exception:
         sys_locale = "en_US"
 
@@ -73,8 +73,23 @@ def init() -> None:
             code = f.stem
             _translations[code] = _load_locale(code)
 
-    # Auto-detect
-    _current_locale = _detect_system_locale()
+    # Check for user-defined language in the config file
+    saved_lang = "auto"
+    from gui.resources import OOPROXY_KEYS_FILE
+    if OOPROXY_KEYS_FILE.exists():
+        try:
+            with open(OOPROXY_KEYS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_lang = data.get("language", "auto")
+        except Exception:
+            pass
+
+    # Determine locale
+    if saved_lang != "auto" and saved_lang in _translations:
+        _current_locale = saved_lang
+    else:
+        _current_locale = _detect_system_locale()
+
     if _current_locale not in _translations:
         _current_locale = _fallback_locale
 

@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QTextBrowser,
 )
 
+from gui.i18n import t
 from gui.resources import PROJECT_ROOT
 from gui.theme import COLORS, FONTS
 
@@ -144,7 +145,7 @@ class HelpTab(QWidget):
         layout.setSpacing(12)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        title = QLabel("Documentação & Ajuda")
+        title = QLabel(t("help.title"))
         title.setObjectName("label_heading")
         title.setFont(QFont(FONTS["family"].split(",")[0].strip(), 16, QFont.Weight.Bold))
         layout.addWidget(title)
@@ -174,5 +175,5 @@ class HelpTab(QWidget):
         else:
             self._browser.setHtml(
                 f'<p style="color:{COLORS["text_muted"]};">'
-                f"README.md não encontrado no diretório do projeto.</p>"
+                f"{t('help.readme_missing')}</p>"
             )

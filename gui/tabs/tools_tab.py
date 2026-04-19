@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.controllers.tools_controller import ToolsController
+from gui.i18n import t
 from gui.models.tool_info import ToolInfo
 from gui.theme import COLORS, FONTS, RADIUS
 
@@ -63,7 +64,7 @@ class ToolCard(QFrame):
         header.addStretch()
 
         if tool.interactive:
-            badge = QLabel("Terminal ↗")
+            badge = QLabel(t("tools.badge_terminal"))
             badge.setStyleSheet(
                 f"color: {COLORS['warning']}; font-size: 10px; "
                 f"background-color: {COLORS['warning_bg']}; "
@@ -74,7 +75,7 @@ class ToolCard(QFrame):
         layout.addLayout(header)
 
         # Description
-        desc_label = QLabel(tool.description or "Sem descrição")
+        desc_label = QLabel(tool.description or t("tools.no_description"))
         desc_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px;")
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
@@ -114,13 +115,13 @@ class ToolsTab(QWidget):
 
         # ── Header ────────────────────────────────────────────────
         header = QHBoxLayout()
-        title = QLabel("Ferramentas Disponíveis")
+        title = QLabel(t("tools.title"))
         title.setObjectName("label_heading")
         title.setFont(QFont(FONTS["family"].split(",")[0].strip(), 16, QFont.Weight.Bold))
         header.addWidget(title)
         header.addStretch()
 
-        self._btn_refresh = QPushButton("↻  Atualizar")
+        self._btn_refresh = QPushButton(t("tools.btn_refresh"))
         self._btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_refresh.clicked.connect(self._controller.discover)
         header.addWidget(self._btn_refresh)
@@ -147,12 +148,12 @@ class ToolsTab(QWidget):
 
         # ── Output Panel ──────────────────────────────────────────
         output_header = QHBoxLayout()
-        output_label = QLabel("Saída da Ferramenta")
+        output_label = QLabel(t("tools.output_title"))
         output_label.setObjectName("label_subheading")
         output_header.addWidget(output_label)
         output_header.addStretch()
 
-        self._btn_cancel = QPushButton("Cancelar")
+        self._btn_cancel = QPushButton(t("tools.btn_cancel"))
         self._btn_cancel.setObjectName("btn_danger")
         self._btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_cancel.setEnabled(False)
@@ -164,7 +165,7 @@ class ToolsTab(QWidget):
         self._output_console = QPlainTextEdit()
         self._output_console.setReadOnly(True)
         self._output_console.setMaximumBlockCount(1000)
-        self._output_console.setPlaceholderText("Clique em uma ferramenta para executá-la…")
+        self._output_console.setPlaceholderText(t("tools.output_placeholder"))
         self._output_console.setMaximumHeight(200)
         layout.addWidget(self._output_console)
 
@@ -191,7 +192,7 @@ class ToolsTab(QWidget):
             self._grid_layout.addWidget(card, idx // cols, idx % cols)
 
         if not tools:
-            empty = QLabel("Nenhuma ferramenta encontrada em tools/")
+            empty = QLabel(t("tools.empty"))
             empty.setStyleSheet(f"color: {COLORS['text_muted']}; padding: 40px;")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._grid_layout.addWidget(empty, 0, 0, 1, cols)
@@ -202,17 +203,22 @@ class ToolsTab(QWidget):
 
     @pyqtSlot(str, str)
     def _on_tool_error(self, name: str, error: str) -> None:
-        self._output_console.appendPlainText(f"[ERRO] {error}")
+        self._output_console.appendPlainText(t("tools.error_prefix", error=error))
 
     @pyqtSlot(str, int, str)
     def _on_tool_finished(self, name: str, exit_code: int, output: str) -> None:
-        status = "OK" if exit_code == 0 else f"ERRO (code={exit_code})"
-        self._output_console.appendPlainText(f"\n─── {name} finalizado: {status} ───")
+        if exit_code == 0:
+            status = t("tools.finished_ok")
+        else:
+            status = t("tools.finished_error", code=exit_code)
+        self._output_console.appendPlainText(
+            f"\n{t('tools.finished', name=name, status=status)}"
+        )
         self._btn_cancel.setEnabled(False)
 
     def _on_tool_clicked(self, tool: ToolInfo) -> None:
         if not tool.interactive:
             self._output_console.clear()
-            self._output_console.appendPlainText(f"▶ Executando {tool.name}…\n")
+            self._output_console.appendPlainText(t("tools.running", name=tool.name) + "\n")
             self._btn_cancel.setEnabled(True)
         self._controller.run_tool(tool)

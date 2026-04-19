@@ -18,12 +18,13 @@ from PyQt6.QtWidgets import (
 from gui.controllers.proxy_controller import ProxyController
 from gui.controllers.settings_controller import SettingsController
 from gui.controllers.tools_controller import ToolsController
+from gui.i18n import t
 from gui.models.proxy_state import ProxyStatus, STATUS_LABELS
+from gui.resources import ICON_PATH
 from gui.tabs.proxy_tab import ProxyTab
 from gui.tabs.settings_tab import SettingsTab
 from gui.tabs.tools_tab import ToolsTab
 from gui.tabs.help_tab import HelpTab
-from gui.resources import ICON_PATH
 from gui.theme import COLORS, FONTS, build_stylesheet
 
 
@@ -78,11 +79,11 @@ class MainWindow(QMainWindow):
         self._tools_tab = ToolsTab(self._tools_ctrl)
         self._help_tab = HelpTab()
 
-        # Add tabs with icons (using emoji as placeholder)
-        self._tabs.addTab(self._proxy_tab, "⚡  Proxy")
-        self._tabs.addTab(self._settings_tab, "⚙  Configurações")
-        self._tabs.addTab(self._tools_tab, "🔧  Ferramentas")
-        self._tabs.addTab(self._help_tab, "❓  Ajuda")
+        # Add tabs with translated labels
+        self._tabs.addTab(self._proxy_tab, t("tabs.proxy"))
+        self._tabs.addTab(self._settings_tab, t("tabs.settings"))
+        self._tabs.addTab(self._tools_tab, t("tabs.tools"))
+        self._tabs.addTab(self._help_tab, t("tabs.help"))
 
         self.setCentralWidget(self._tabs)
 
@@ -90,12 +91,12 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
 
-        self._status_label = QLabel("Inicializando…")
+        self._status_label = QLabel(t("statusbar.initializing"))
         self._status_label.setStyleSheet(f"color: {COLORS['text_muted']}; padding: 0 8px;")
         self._status_bar.addWidget(self._status_label)
 
         self._status_bar.addPermanentWidget(
-            QLabel(f"ooProxy Manager  •  localhost:11434")
+            QLabel(t("statusbar.footer", port=11434))
         )
 
     def _setup_tray_icon(self) -> None:
@@ -109,19 +110,19 @@ class MainWindow(QMainWindow):
         # Context menu
         tray_menu = QMenu()
 
-        action_show = QAction("Mostrar / Ocultar", self)
+        action_show = QAction(t("tray.show_hide"), self)
         action_show.triggered.connect(self._toggle_visibility)
         tray_menu.addAction(action_show)
 
         tray_menu.addSeparator()
 
-        action_stop = QAction("Parar Proxy", self)
+        action_stop = QAction(t("tray.stop_proxy"), self)
         action_stop.triggered.connect(self._proxy_ctrl.stop_proxy)
         tray_menu.addAction(action_stop)
 
         tray_menu.addSeparator()
 
-        action_quit = QAction("Sair", self)
+        action_quit = QAction(t("tray.quit"), self)
         action_quit.triggered.connect(self._quit_app)
         tray_menu.addAction(action_quit)
 
@@ -152,7 +153,7 @@ class MainWindow(QMainWindow):
     # ── Slots ─────────────────────────────────────────────────────
 
     def _update_status_bar(self, status: ProxyStatus) -> None:
-        label = STATUS_LABELS.get(status, "Desconhecido")
+        label = STATUS_LABELS.get(status, t("proxy.status.unknown"))
         color_map = {
             ProxyStatus.RUNNING: COLORS["success"],
             ProxyStatus.ERROR: COLORS["error"],
@@ -160,7 +161,7 @@ class MainWindow(QMainWindow):
             ProxyStatus.STOPPING: COLORS["warning"],
         }
         color = color_map.get(status, COLORS["text_muted"])
-        self._status_label.setText(f"Proxy: {label}")
+        self._status_label.setText(t("statusbar.proxy_status", status=label))
         self._status_label.setStyleSheet(f"color: {color}; padding: 0 8px;")
 
         # Update tray tooltip
@@ -203,8 +204,8 @@ class MainWindow(QMainWindow):
             self.hide()
             if self._tray_icon:
                 self._tray_icon.showMessage(
-                    "ooProxy Manager",
-                    "O proxy continua rodando na bandeja do sistema.",
+                    t("tray.minimized_title"),
+                    t("tray.minimized_msg"),
                     QSystemTrayIcon.MessageIcon.Information,
                     2000,
                 )

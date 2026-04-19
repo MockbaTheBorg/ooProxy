@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.controllers.proxy_controller import ProxyController
+from gui.i18n import t
 from gui.models.proxy_state import ProxyStatus, STATUS_LABELS
 from gui.theme import COLORS, FONTS
 
@@ -79,7 +80,7 @@ class ProxyTab(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
 
         # ── Status Section ────────────────────────────────────────
-        status_group = QGroupBox("Status do Proxy")
+        status_group = QGroupBox(t("proxy.status_group"))
         status_layout = QHBoxLayout(status_group)
         status_layout.setSpacing(16)
 
@@ -87,7 +88,7 @@ class ProxyTab(QWidget):
         self._led = StatusLED()
         status_layout.addWidget(self._led)
 
-        self._status_label = QLabel("Verificando…")
+        self._status_label = QLabel(t("proxy.checking"))
         self._status_label.setObjectName("label_heading")
         self._status_label.setFont(QFont(FONTS["family"].split(",")[0].strip(), 16, QFont.Weight.Bold))
         status_layout.addWidget(self._status_label)
@@ -96,11 +97,11 @@ class ProxyTab(QWidget):
 
         # Backend info
         info_frame = QVBoxLayout()
-        self._backend_label = QLabel("Backend: —")
+        self._backend_label = QLabel(t("proxy.backend_empty"))
         self._backend_label.setObjectName("label_muted")
         info_frame.addWidget(self._backend_label)
 
-        self._port_label = QLabel("Local: http://127.0.0.1:11434")
+        self._port_label = QLabel(t("proxy.local", port=11434))
         self._port_label.setObjectName("label_muted")
         info_frame.addWidget(self._port_label)
 
@@ -111,13 +112,13 @@ class ProxyTab(QWidget):
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(12)
 
-        self._btn_start = QPushButton("▶  Iniciar Proxy")
+        self._btn_start = QPushButton(t("proxy.btn_start"))
         self._btn_start.setObjectName("btn_primary")
         self._btn_start.setMinimumHeight(40)
         self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         controls_layout.addWidget(self._btn_start)
 
-        self._btn_stop = QPushButton("■  Parar Proxy")
+        self._btn_stop = QPushButton(t("proxy.btn_stop"))
         self._btn_stop.setObjectName("btn_danger")
         self._btn_stop.setMinimumHeight(40)
         self._btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -126,8 +127,8 @@ class ProxyTab(QWidget):
 
         controls_layout.addStretch()
 
-        self._btn_install = QPushButton("⏻  Auto-Start")
-        self._btn_install.setToolTip("Registrar/remover auto-start no Windows")
+        self._btn_install = QPushButton(t("proxy.btn_autostart"))
+        self._btn_install.setToolTip(t("proxy.btn_autostart"))
         self._btn_install.setMinimumHeight(40)
         self._btn_install.setCursor(Qt.CursorShape.PointingHandCursor)
         controls_layout.addWidget(self._btn_install)
@@ -143,21 +144,21 @@ class ProxyTab(QWidget):
         # ── Log Console ───────────────────────────────────────────
         log_header = QHBoxLayout()
 
-        log_label = QLabel("Console de Logs")
+        log_label = QLabel(t("proxy.log_console"))
         log_label.setObjectName("label_subheading")
         log_header.addWidget(log_label)
 
         log_header.addStretch()
 
-        self._btn_export = QPushButton("📥  Exportar")
-        self._btn_export.setToolTip("Salvar logs em arquivo")
+        self._btn_export = QPushButton(t("proxy.btn_export"))
+        self._btn_export.setToolTip(t("proxy.btn_export_tooltip"))
         self._btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_export.setFixedHeight(28)
         self._btn_export.clicked.connect(self._on_export_clicked)
         log_header.addWidget(self._btn_export)
 
-        self._btn_clear = QPushButton("🗑  Limpar")
-        self._btn_clear.setToolTip("Limpar console de logs")
+        self._btn_clear = QPushButton(t("proxy.btn_clear"))
+        self._btn_clear.setToolTip(t("proxy.btn_clear_tooltip"))
         self._btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_clear.setFixedHeight(28)
         self._btn_clear.clicked.connect(lambda: self._log_console.clear())
@@ -168,7 +169,7 @@ class ProxyTab(QWidget):
         self._log_console = QPlainTextEdit()
         self._log_console.setReadOnly(True)
         self._log_console.setMaximumBlockCount(2000)
-        self._log_console.setPlaceholderText("Logs do proxy aparecerão aqui…")
+        self._log_console.setPlaceholderText(t("proxy.log_placeholder"))
         self._log_console.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._log_console)
 
@@ -187,7 +188,7 @@ class ProxyTab(QWidget):
     @pyqtSlot(object)
     def _on_status_changed(self, status: ProxyStatus) -> None:
         self._led.set_status(status)
-        self._status_label.setText(STATUS_LABELS.get(status, "Desconhecido"))
+        self._status_label.setText(STATUS_LABELS.get(status, t("proxy.status.unknown")))
 
         is_running = status == ProxyStatus.RUNNING
         is_stopped = status in (ProxyStatus.STOPPED, ProxyStatus.ERROR, ProxyStatus.UNKNOWN)
@@ -228,7 +229,7 @@ class ProxyTab(QWidget):
         default_name = f"ooproxy_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Exportar Logs",
+            t("proxy.export_dialog_title"),
             default_name,
             "Log Files (*.log);;Text Files (*.txt);;All Files (*)",
         )
@@ -236,31 +237,31 @@ class ProxyTab(QWidget):
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(self._log_console.toPlainText())
-                self._log_console.appendPlainText(f"[OK] Logs exportados para: {path}")
+                self._log_console.appendPlainText(t("proxy.export_ok", path=path))
             except OSError as e:
-                self._log_console.appendPlainText(f"[ERRO] Falha ao exportar: {e}")
+                self._log_console.appendPlainText(t("proxy.export_error", error=str(e)))
 
     def _on_install_clicked(self) -> None:
         # Toggle based on current button text
-        if "Remover" in self._btn_install.text():
+        if t("proxy.btn_autostart_remove") == self._btn_install.text():
             self._controller.uninstall_startup()
-            self._btn_install.setText("⏻  Auto-Start")
+            self._btn_install.setText(t("proxy.btn_autostart"))
         else:
             self._controller.install_startup()
-            self._btn_install.setText("⏻  Remover Auto-Start")
+            self._btn_install.setText(t("proxy.btn_autostart_remove"))
 
     # ── Public API for MainWindow ─────────────────────────────────
 
     def update_backend_info(self, url: str, port: int) -> None:
         """Update the displayed backend URL and port."""
-        self._backend_label.setText(f"Backend: {url}")
-        self._port_label.setText(f"Local: http://127.0.0.1:{port}")
+        self._backend_label.setText(t("proxy.backend", url=url))
+        self._port_label.setText(t("proxy.local", port=port))
         self._controller._url = url
         self._controller._port = port
 
     def set_auto_start_status(self, installed: bool) -> None:
         """Update the auto-start button text."""
         if installed:
-            self._btn_install.setText("⏻  Remover Auto-Start")
+            self._btn_install.setText(t("proxy.btn_autostart_remove"))
         else:
-            self._btn_install.setText("⏻  Auto-Start")
+            self._btn_install.setText(t("proxy.btn_autostart"))

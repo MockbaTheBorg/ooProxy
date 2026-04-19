@@ -33,4 +33,5 @@ class AppSettings:
     local_host: str = "127.0.0.1"
     local_port: int = 11434
     auto_start_enabled: bool = False
+    language: str = "auto"
     keys: list[KeyEntry] = field(default_factory=list)

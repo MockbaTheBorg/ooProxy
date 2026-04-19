@@ -85,7 +85,12 @@
     "key_not_found": "Key for {endpoint} not found.",
     "load_error": "Failed to load settings: {error}",
     "migrating_keys": "Migrating legacy keys to DPAPI...",
-    "migrate_error": "Warning: Error reading legacy keys ({error})"
+    "migrate_error": "Warning: Error reading legacy keys ({error})",
+    "language": "Language:",
+    "lang_auto": "Auto (System)",
+    "lang_en": "English",
+    "lang_pt": "Português",
+    "restart_required": "Please restart the application to apply the language change."
   },
   "tools": {
     "title": "Available Tools",

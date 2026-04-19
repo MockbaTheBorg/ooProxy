@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from gui.i18n import t
 from gui.models.app_settings import AppSettings, KeyEntry, KNOWN_BACKENDS
 from gui.resources import OOPROXY_DIR, OOPROXY_KEYS_FILE
 from gui.workers.powershell_runner import PowerShellRunner
@@ -41,7 +42,7 @@ class SettingsController(QObject):
             self._settings = AppSettings()
             self._try_migrate_legacy_keys()
             self.settings_loaded.emit(self._settings)
-            
+
             # Check if scheduled task exists
             self._check_startup_status()
             return
@@ -49,6 +50,7 @@ class SettingsController(QObject):
         try:
             raw = json.loads(OOPROXY_KEYS_FILE.read_text(encoding="utf-8"))
             url = raw.get("url", self._settings.backend_url)
+            lang = raw.get("language", "auto")
             entries = raw.get("entries", {})
 
             keys = []
@@ -56,9 +58,10 @@ class SettingsController(QObject):
                 keys.append(KeyEntry(endpoint=endpoint, key_encrypted=encrypted))
 
             self._settings.backend_url = url
+            self._settings.language = lang
             self._settings.keys = keys
         except Exception as exc:
-            self.message.emit(f"Falha ao carregar configurações: {exc}")
+            self.message.emit(t("settings.load_error", error=str(exc)))
 
         # Check if scheduled task exists
         self._check_startup_status()
@@ -68,19 +71,25 @@ class SettingsController(QObject):
         """Update the backend URL in settings."""
         self._settings.backend_url = url.rstrip("/")
         self._persist_keys()
-        self.message.emit(f"URL atualizada: {url}")
+        self.message.emit(t("settings.url_updated", url=url))
 
     def save_port(self, port: int) -> None:
         """Update the local port."""
         self._settings.local_port = port
-        self.message.emit(f"Porta atualizada: {port}")
+        self.message.emit(t("settings.port_updated", port=port))
+
+    def save_language(self, lang: str) -> None:
+        """Update the UI language."""
+        self._settings.language = lang
+        self._persist_keys()
+        self.message.emit(t("settings.restart_required"))
 
     # ── Key Management (DPAPI via PowerShell) ─────────────────────────
 
     def add_key(self, endpoint: str, plain_key: str) -> None:
         """Encrypt a key using DPAPI and save it."""
         if not endpoint or not plain_key:
-            self.key_saved.emit(False, "Endpoint e chave são obrigatórios.")
+            self.key_saved.emit(False, t("settings.key_required"))
             return
 
         # Escape single quotes for PowerShell
@@ -103,9 +112,9 @@ class SettingsController(QObject):
         self._settings.keys = [k for k in self._settings.keys if k.endpoint != endpoint]
         if len(self._settings.keys) < before:
             self._persist_keys()
-            self.key_deleted.emit(True, f"Chave para {endpoint} removida.")
+            self.key_deleted.emit(True, t("settings.key_deleted", endpoint=endpoint))
         else:
-            self.key_deleted.emit(False, f"Chave para {endpoint} não encontrada.")
+            self.key_deleted.emit(False, t("settings.key_not_found", endpoint=endpoint))
 
     def get_endpoints(self) -> list[str]:
         """Return list of configured endpoints."""
@@ -131,7 +140,7 @@ class SettingsController(QObject):
 
     def _on_key_encrypted(self, ok: bool, stdout: str, stderr: str, endpoint: str) -> None:
         if not ok or not stdout.strip():
-            self.key_saved.emit(False, f"Falha ao criptografar: {stderr}")
+            self.key_saved.emit(False, t("settings.key_encrypt_error", error=stderr))
             return
 
         encrypted = stdout.strip()
@@ -147,7 +156,7 @@ class SettingsController(QObject):
             self._settings.keys.append(KeyEntry(endpoint=endpoint, key_encrypted=encrypted))
 
         self._persist_keys()
-        self.key_saved.emit(True, f"Chave para {endpoint} salva com DPAPI.")
+        self.key_saved.emit(True, t("settings.key_saved", endpoint=endpoint))
 
     def _persist_keys(self) -> None:
         """Write the current keys to the DPAPI keys file."""
@@ -160,6 +169,7 @@ class SettingsController(QObject):
         data = {
             "version": "v2-dpapi",
             "url": self._settings.backend_url,
+            "language": self._settings.language,
             "entries": entries,
         }
 
@@ -177,10 +187,10 @@ class SettingsController(QObject):
             if not legacy_keys:
                 return
 
-            self.message.emit("Migrando chaves legacy para DPAPI...")
+            self.message.emit(t("settings.migrating_keys"))
             for endpoint in legacy_keys:
                 plain_key = ks.get_key(endpoint)
                 if plain_key:
                     self.add_key(endpoint, plain_key)
         except Exception as e:
-            self.message.emit(f"Aviso: Erro ao ler chaves antigas ({e})")
+            self.message.emit(t("settings.migrate_error", error=str(e)))

@@ -12,10 +12,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from modules._server.key_store import ApiKeyStore, normalize_endpoint
+from ooproxy_version import cli_version
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage API keys stored in ~/.ooProxy/keys.json.")
+    parser.add_argument("--version", action="version", version=cli_version("ooproxy_keys"))
     parser.add_argument("-H", "--host", help="Endpoint host or host:port used as the key-store index")
     parser.add_argument("--key", help="API key to store for the endpoint")
     parser.add_argument("--delete", action="store_true", help="Delete the stored key for the endpoint")

@@ -10,6 +10,7 @@ import pkgutil
 import sys
 
 from cli_contract import CommandError, ModuleSpec, OptionSpec, ResultEnvelope, dataclass_to_plain
+from ooproxy_version import cli_version
 
 
 MODULE_PACKAGE = os.environ.get("CLI_MODULE_PACKAGE", "modules")
@@ -40,6 +41,7 @@ def build_parser(modules: dict[str, object]) -> tuple[argparse.ArgumentParser, d
         epilog=build_global_help(modules),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=cli_version("ooProxy"))
     parser.add_argument("-j", "--json", dest="json_output", action="store_true", help="Return JSON output")
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Enable debug output (implies --verbose)")

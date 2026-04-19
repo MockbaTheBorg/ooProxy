@@ -10,6 +10,15 @@ import json
 _DEFAULT_MAX_TOKENS = 32768
 
 
+def _ensure_sentence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "unknown error."
+    if stripped.endswith((".", "!", "?")):
+        return stripped
+    return f"{stripped}."
+
+
 def _tool_failed(content: str) -> bool:
     if not content:
         return False
@@ -26,8 +35,53 @@ def _tool_failed(content: str) -> bool:
     return bool(payload.get("error")) and payload.get("ok") is not True
 
 
-def _tool_return_code_payload(content: str) -> str:
-    return json.dumps({"return_code": 1 if _tool_failed(content) else 0}, ensure_ascii=False)
+def _tool_failure_detail(content: str) -> str:
+    stripped = content.strip()
+    if not stripped:
+        return "unknown error"
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return stripped
+    if not isinstance(payload, dict):
+        return stripped
+
+    message = payload.get("message")
+    error = payload.get("error")
+    return_code = payload.get("return_code")
+
+    if isinstance(message, str) and message.strip():
+        if isinstance(error, str) and error.strip() and error.strip() not in message:
+            return f"{error.strip()}: {message.strip()}"
+        return message.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(return_code, int) and return_code != 0:
+        return f"return code {return_code}"
+    return stripped
+
+
+def _tool_status_message(content: str) -> str:
+    if _tool_failed(content):
+        return f"tool failed, error: {_ensure_sentence(_tool_failure_detail(content))}"
+    return "tool succeeded, no further action needed."
+
+
+def _is_tool_success_status(content: object) -> bool:
+    return isinstance(content, str) and content.strip() == "tool succeeded, no further action needed."
+
+
+def _is_tool_failure_status(content: object) -> bool:
+    return isinstance(content, str) and content.strip().startswith("tool failed, error:")
+
+
+def _implicit_direct_display_reply(message: dict) -> str | None:
+    content = message.get("display_content") if isinstance(message.get("display_content"), str) else message.get("content")
+    if _is_tool_success_status(content):
+        return ""
+    if _is_tool_failure_status(content):
+        return content if isinstance(content, str) else None
+    return None
 
 
 def _wrap_tool_output(content: str) -> str:
@@ -36,7 +90,7 @@ def _wrap_tool_output(content: str) -> str:
 
 def _tool_output_for_model(content: str, *, display_directly: bool) -> str:
     if display_directly:
-        return _tool_return_code_payload(content)
+        return _tool_status_message(content)
     if "\n" in content or content.startswith((" ", "\t")) or content.endswith(("\n", " ", "\t")):
         return _wrap_tool_output(content)
     return content
@@ -83,6 +137,27 @@ def _sanitize_tools(tools: object) -> tuple[list[dict] | None, set[str]]:
     return sanitized_tools, direct_display_tools
 
 
+def _normalize_message_content_for_upstream(message: dict, *, fallback: str = " ") -> dict:
+    normalized = dict(message)
+    content = normalized.get("content")
+    if isinstance(content, str):
+        if content:
+            return normalized
+        normalized["content"] = fallback
+        return normalized
+    if content is None:
+        normalized["content"] = fallback
+    return normalized
+
+
+def _normalize_tool_choice_for_upstream(tool_choice: object) -> object | None:
+    if tool_choice == "auto":
+        return None
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "auto":
+        return None
+    return tool_choice
+
+
 def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[str]) -> list[dict]:
     out: list[dict] = []
     pending_tool_calls: list[dict] = []
@@ -96,7 +171,7 @@ def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[s
                 function = tool_call.get("function") or {}
                 call_id = tool_call.get("id") or f"call_{message_index}_{tool_index}"
                 pending_tool_calls.append({"id": call_id, "name": function.get("name", "unknown_tool")})
-            normalized = dict(message)
+            normalized = _normalize_message_content_for_upstream(message)
             normalized["tool_calls"] = tool_calls
             out.append(normalized)
             continue
@@ -130,10 +205,10 @@ def _normalize_openai_messages(messages: list[dict], direct_display_tools: set[s
                 )
             normalized.pop("display_content", None)
             normalized.pop("display_directly", None)
-            out.append(normalized)
+            out.append(_normalize_message_content_for_upstream(normalized))
             continue
 
-        out.append(dict(message))
+        out.append(_normalize_message_content_for_upstream(message))
 
     return out
 
@@ -166,9 +241,6 @@ def _resolve_direct_display_tool_name(messages: list[dict], direct_display_tools
 
 def direct_display_tool_reply(body: dict) -> str | None:
     tools, direct_display_tools = _sanitize_tools(body.get("tools"))
-    if not direct_display_tools:
-        return None
-
     messages = body.get("messages") or []
     if not isinstance(messages, list) or not messages:
         return None
@@ -177,9 +249,12 @@ def direct_display_tool_reply(body: dict) -> str | None:
     if not isinstance(last_message, dict) or last_message.get("role") != "tool":
         return None
 
+    if not direct_display_tools:
+        return _implicit_direct_display_reply(last_message)
+
     tool_name = _resolve_direct_display_tool_name(messages, direct_display_tools, last_message)
     if not tool_name:
-        return None
+        return _implicit_direct_display_reply(last_message)
 
     content = last_message.get("display_content") if isinstance(last_message.get("display_content"), str) else last_message.get("content")
     return content if isinstance(content, str) else None
@@ -190,6 +265,11 @@ def sanitize_openai_chat_body(body: dict) -> dict:
     out = dict(body)
     messages = body.get("messages") or []
     out["messages"] = _normalize_openai_messages(messages if isinstance(messages, list) else [], direct_display_tools)
+    normalized_tool_choice = _normalize_tool_choice_for_upstream(body.get("tool_choice"))
+    if normalized_tool_choice is None:
+        out.pop("tool_choice", None)
+    else:
+        out["tool_choice"] = normalized_tool_choice
     if sanitized_tools is not None:
         out["tools"] = sanitized_tools
     else:
@@ -309,8 +389,9 @@ def chat_to_openai(body: dict) -> dict:
     }
     if sanitized_tools is not None:
         out["tools"] = sanitized_tools
-    if "tool_choice" in body:
-        out["tool_choice"] = body["tool_choice"]
+    normalized_tool_choice = _normalize_tool_choice_for_upstream(body.get("tool_choice"))
+    if normalized_tool_choice is not None:
+        out["tool_choice"] = normalized_tool_choice
     if "stream" in body:
         out["stream"] = body["stream"]
         if body["stream"]:
@@ -501,6 +582,9 @@ def _responses_tools_to_openai(tools: object) -> list[dict] | None:
 
 
 def _responses_tool_choice_to_openai(tool_choice: object) -> object:
+    tool_choice = _normalize_tool_choice_for_upstream(tool_choice)
+    if tool_choice is None:
+        return None
     if isinstance(tool_choice, str):
         if tool_choice == "required":
             return "required"
@@ -540,7 +624,9 @@ def responses_to_openai_chat(body: dict, previous_messages: list[dict] | None = 
     if converted_tools is not None:
         out["tools"] = converted_tools
     if body.get("tool_choice") is not None:
-        out["tool_choice"] = _responses_tool_choice_to_openai(body["tool_choice"])
+        normalized_tool_choice = _responses_tool_choice_to_openai(body["tool_choice"])
+        if normalized_tool_choice is not None:
+            out["tool_choice"] = normalized_tool_choice
     if out["stream"]:
         out["stream_options"] = {"include_usage": True}
     if body.get("temperature") is not None:
@@ -675,9 +761,7 @@ def anthropic_messages_to_openai_chat(body: dict) -> dict:
     tool_choice = body.get("tool_choice")
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
-        if choice_type == "auto":
-            out["tool_choice"] = "auto"
-        elif choice_type == "any":
+        if choice_type == "any":
             out["tool_choice"] = "required"
         elif choice_type == "tool" and tool_choice.get("name"):
             out["tool_choice"] = {"type": "function", "function": {"name": tool_choice["name"]}}

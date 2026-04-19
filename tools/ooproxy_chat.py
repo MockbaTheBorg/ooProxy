@@ -3,6 +3,7 @@ import atexit
 import hashlib
 import json
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -12,11 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import requests
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.key_binding import KeyBindings
+
+from ooproxy_version import cli_version
 
 # These three are rewritten by _init_session_paths() before anything else runs.
 CONTEXT_FILE = ""
@@ -24,6 +31,7 @@ HISTORY_FILE = ""
 LOCK_FILE = ""
 CURRENT_SESSION_ID = ""
 LAUNCH_COMMAND_PREFIX = ""
+CHAT_SCRIPT_NAMES = ("ooproxy_chat.py",)
 
 ATTACHMENT_BUFFER: List[str] = []
 DEFAULT_TOOL_TIMEOUT = 120
@@ -103,13 +111,13 @@ def _write_session_meta(session_id: str, **updates: Any) -> None:
 
 
 def _session_locked(session_id: str) -> bool:
-    """Return True if the session is held by a live ollama_chat process."""
+    """Return True if the session is held by a live chat CLI process."""
     lock = _session_dir(session_id) / "lock"
     if not lock.exists():
         return False
     try:
         pid = int(lock.read_text().strip())
-        return _pid_alive(pid) and _is_ollama_chat_process(pid)
+        return _pid_alive(pid) and _is_ooproxy_chat_process(pid)
     except Exception:
         return False
 
@@ -173,14 +181,17 @@ def _prompt_session_selection(sessions: List[Dict[str, Any]]) -> str:
 
 
 def _migrate_legacy_context(session_id: str) -> bool:
-    """Copy .ollama_chat_context from CWD into the new session if it exists."""
-    legacy = Path(".ollama_chat_context")
-    if not legacy.exists():
+    """Copy chat context files from CWD into the new session if they exist.
+
+    The preferred filenames are `.ooproxy_chat_context` / `.ooproxy_chat_history`.
+    """
+    source = Path(".ooproxy_chat_context")
+    if not source.exists():
         return False
     dest = _session_dir(session_id) / "context.json"
     try:
-        dest.write_text(legacy.read_text())
-        legacy_hist = Path(".ollama_chat_history")
+        dest.write_text(source.read_text())
+        legacy_hist = Path(".ooproxy_chat_history")
         if legacy_hist.exists():
             hist_dest = _session_dir(session_id) / "history"
             hist_dest.write_text(legacy_hist.read_text())
@@ -247,7 +258,7 @@ CONTINUE_SESSION = False
 
 
 def _looks_like_chat_script(path: str) -> bool:
-    return os.path.basename(path) == "ollama_chat.py"
+    return os.path.basename(path) in CHAT_SCRIPT_NAMES
 
 
 def _capture_launch_command_prefix() -> None:
@@ -762,16 +773,39 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
     if bool(command) == bool(argv):
         raise ValueError(f"External tool '{name}' must define exactly one of 'command' or 'argv'.")
 
+    placeholder_pattern = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+    def _stringify_argument(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False)
+
+    def _expand_template(template: str, *, shell_mode: bool, arguments: Dict[str, Any]) -> str:
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            if key not in arguments:
+                return match.group(0)
+            value = _stringify_argument(arguments[key])
+            return shlex.quote(value) if shell_mode else value
+
+        return placeholder_pattern.sub(_replace, template)
+
     def _run_external_tool(**arguments: Any) -> str:
         input_payload = json.dumps(arguments, ensure_ascii=False)
         env = os.environ.copy()
-        env["OLLAMA_TOOL_NAME"] = name
-        env["OLLAMA_TOOL_ARGS"] = input_payload
-        env["OLLAMA_TOOL_CWD"] = os.getcwd()
+        # Expose `OOPROXY_*` env vars for external tools.
+        env["OOPROXY_TOOL_NAME"] = name
+        env["OOPROXY_TOOL_ARGS"] = input_payload
+        env["OOPROXY_TOOL_CWD"] = os.getcwd()
         working_directory = os.path.abspath(cwd) if cwd else os.getcwd()
+        expanded_command = _expand_template(command, shell_mode=True, arguments=arguments) if command else None
+        expanded_argv = [
+            _expand_template(str(part), shell_mode=False, arguments=arguments)
+            for part in argv
+        ] if argv else None
 
         result = subprocess.run(
-            command if command else [str(part) for part in argv],
+            expanded_command if expanded_command else expanded_argv,
             shell=bool(command),
             cwd=working_directory,
             input=input_payload,
@@ -785,7 +819,7 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         stderr = result.stderr.rstrip("\r\n")
         if result.returncode != 0:
             raise RuntimeError(_json_result({
-                "command": command if command else argv,
+                "command": expanded_command if expanded_command else expanded_argv,
                 "cwd": working_directory,
                 "exit_code": result.returncode,
                 "stdout": _truncate_text(stdout),
@@ -797,7 +831,7 @@ def _tool_command_handler_factory(name: str, command_spec: Dict[str, Any]) -> To
         if stderr:
             return _truncate_text(stderr)
         return _json_result({
-            "command": command if command else argv,
+            "command": expanded_command if expanded_command else expanded_argv,
             "cwd": working_directory,
             "exit_code": result.returncode,
         })
@@ -1019,8 +1053,45 @@ def _tool_result_failed(result: str) -> bool:
     return bool(payload.get("error")) and payload.get("ok") is not True
 
 
-def _tool_return_code_result(ok: bool) -> str:
-    return json.dumps({"return_code": 0 if ok else 1}, ensure_ascii=False)
+def _ensure_sentence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "unknown error."
+    if stripped.endswith((".", "!", "?")):
+        return stripped
+    return f"{stripped}."
+
+
+def _tool_failure_detail(result: str) -> str:
+    stripped = result.strip()
+    if not stripped:
+        return "unknown error"
+    try:
+        payload = json.loads(result)
+    except Exception:
+        return stripped
+    if not isinstance(payload, dict):
+        return stripped
+
+    message = payload.get("message")
+    error = payload.get("error")
+    return_code = payload.get("return_code")
+
+    if isinstance(message, str) and message.strip():
+        if isinstance(error, str) and error.strip() and error.strip() not in message:
+            return f"{error.strip()}: {message.strip()}"
+        return message.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(return_code, int) and return_code != 0:
+        return f"return code {return_code}"
+    return stripped
+
+
+def _tool_status_message(ok: bool, result: str) -> str:
+    if ok:
+        return "tool succeeded, no further action needed."
+    return f"tool failed, error: {_ensure_sentence(_tool_failure_detail(result))}"
 
 
 def _command_looks_destructive(command: str) -> bool:
@@ -1144,7 +1215,7 @@ def _message_tool_summaries(message: Dict[str, Any]) -> List[str]:
         if any(call.get("name") != "unknown_tool" for call in normalized_calls):
             return [_tool_summary(call) for call in normalized_calls]
 
-    normalized_calls = _normalize_ollama_tool_calls(tool_calls)
+    normalized_calls = _normalize_ooproxy_tool_calls(tool_calls)
     return [_tool_summary(call) for call in normalized_calls]
 
 
@@ -1368,7 +1439,7 @@ def _normalize_openai_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[
     return normalized
 
 
-def _normalize_ollama_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _normalize_ooproxy_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for index, tool_call in enumerate(tool_calls):
         function = tool_call.get("function") or {}
@@ -1394,7 +1465,7 @@ def _assistant_message_from_response(data: Dict[str, Any], use_openai: bool) -> 
 
     message = data.get("message") or {}
     content = message.get("content") or ""
-    normalized_calls = _normalize_ollama_tool_calls(message.get("tool_calls") or [])
+    normalized_calls = _normalize_ooproxy_tool_calls(message.get("tool_calls") or [])
     return _assistant_message_from_parts(content, normalized_calls, use_openai), normalized_calls
 
 
@@ -1418,7 +1489,7 @@ def _tool_result_message_with_mode(
     display_directly: bool,
     ok: bool,
 ) -> Dict[str, Any]:
-    content = _tool_return_code_result(ok) if display_directly else result
+    content = _tool_status_message(ok, result) if display_directly else result
     if use_openai:
         message = {
             "role": "tool",
@@ -1481,7 +1552,7 @@ def _update_openai_tool_buffers(buffers: Dict[int, Dict[str, Any]], tool_calls: 
             buffer["arguments"] = json.dumps(arguments, ensure_ascii=False)
 
 
-def _update_ollama_tool_buffers(buffers: Dict[int, Dict[str, Any]], tool_calls: List[Dict[str, Any]]) -> None:
+def _update_ooproxy_tool_buffers(buffers: Dict[int, Dict[str, Any]], tool_calls: List[Dict[str, Any]]) -> None:
     for index, tool_call in enumerate(tool_calls):
         function = tool_call.get("function") or {}
         call_index = function.get("index", index)
@@ -1563,7 +1634,7 @@ def _stream_chat_response(
     response, tools_active_for_turn = _open_chat_stream(url, payload, allow_tool_fallback)
     content_parts: List[str] = []
     openai_tool_buffers: Dict[int, Dict[str, Any]] = {}
-    ollama_tool_buffers: Dict[int, Dict[str, Any]] = {}
+    ooproxy_tool_buffers: Dict[int, Dict[str, Any]] = {}
     printed_content = False
     thinking_status_shown = _show_thinking_status()
     stream_renderer = _ThinkingStreamRenderer(console=_RICH_CONSOLE) if _render_mode_streams_live(render_mode) else None
@@ -1600,7 +1671,7 @@ def _stream_chat_response(
                     tool_calls = message.get("tool_calls") or []
                     if tool_calls:
                         _mark_response_started()
-                    _update_ollama_tool_buffers(ollama_tool_buffers, tool_calls)
+                    _update_ooproxy_tool_buffers(ooproxy_tool_buffers, tool_calls)
                     continue
 
                 choices = chunk.get("choices") or []
@@ -1634,7 +1705,7 @@ def _stream_chat_response(
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
                 _mark_response_started()
-            _update_ollama_tool_buffers(ollama_tool_buffers, tool_calls)
+                _update_ooproxy_tool_buffers(ooproxy_tool_buffers, tool_calls)
     finally:
         response.close()
         _clear_thinking_status(thinking_status_shown)
@@ -1645,7 +1716,7 @@ def _stream_chat_response(
     if printed_content:
         print()
 
-    normalized_calls = _finalize_stream_tool_calls(openai_tool_buffers if openai_tool_buffers else ollama_tool_buffers)
+    normalized_calls = _finalize_stream_tool_calls(openai_tool_buffers if openai_tool_buffers else ooproxy_tool_buffers)
     content = "".join(content_parts)
     assistant_message = _assistant_message_from_parts(content, normalized_calls, use_openai)
     return assistant_message, normalized_calls, tools_active_for_turn
@@ -1660,10 +1731,14 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _is_ollama_chat_process(pid: int) -> bool:
+def _is_ooproxy_chat_process(pid: int) -> bool:
+    
+    
+    
+    
     """Heuristic: return True if PID's command or cwd looks like this chat tool.
 
-    Checks /proc/<pid>/cmdline for this script name or 'ollama_chat', and
+    Checks /proc/<pid>/cmdline for this script name or the legacy/new chat CLI names, and
     /proc/<pid>/cwd for matching working directory. Returns False if the
     checks fail or indicate a different program.
     """
@@ -1675,9 +1750,10 @@ def _is_ollama_chat_process(pid: int) -> bool:
                 raw = f.read()
             # cmdline is null-separated
             parts = [p.decode(errors="ignore") for p in raw.split(b"\0") if p]
-            script_name = os.path.basename(__file__)
+            script_names = {os.path.basename(__file__), *CHAT_SCRIPT_NAMES}
             for p in parts:
-                if script_name in p or "ollama_chat" in p.lower():
+                lowered = p.lower()
+                if any(name.lower() in lowered for name in script_names) or "ooproxy_chat" in lowered:
                     return True
 
         # Check cwd matches current working directory
@@ -1716,12 +1792,12 @@ def acquire_pidfile(lockfile: Optional[str] = None) -> None:
             existing = None
 
         if existing and _pid_alive(existing):
-            # If the running PID appears to be an ollama_chat process, respect it.
-            if _is_ollama_chat_process(existing):
+            # If the running PID appears to be this chat CLI, respect it.
+            if _is_ooproxy_chat_process(existing):
                 print(f"⛔ Another session (PID {existing}) is using this folder. Exiting.")
                 sys.exit(1)
             # Otherwise treat as stale and attempt to reclaim
-            print(f"⚠️ Lock held by PID {existing} which is not an ollama_chat instance; reclaiming lock.")
+            print(f"⚠️ Lock held by PID {existing} which is not an ooproxy_chat instance; reclaiming lock.")
 
         # stale lock: remove and retry once
         try:
@@ -1890,20 +1966,20 @@ def read_file_content(filepath: str) -> str:
         return None
 
 def get_available_models(base_url: str) -> List[str]:
-    """Fetch list of models from Ollama server."""
+    """Fetch list of models from a local model server (or OpenAI-compatible endpoint)."""
     try:
-        # Native Ollama endpoint for listing models
+        # Native local endpoint for listing models
         response = requests.get(f"{base_url}/api/tags", timeout=5)
         if response.status_code == 200:
             data = response.json()
             return sorted((m['name'] for m in data.get('models', [])), key=str.casefold)
-        
+
         # Fallback for OpenAI compatible endpoints (often at /v1/models)
         response = requests.get(f"{base_url}/v1/models", timeout=5)
         if response.status_code == 200:
             data = response.json()
             return sorted((m['id'] for m in data.get('data', [])), key=str.casefold)
-            
+
     except Exception as e:
         print(f"⚠️ Could not fetch models: {e}")
     return []
@@ -2049,7 +2125,7 @@ def _tools_markdown_table() -> str:
     return "\n".join(lines)
 
 
-def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: bool, render_mode: str, guardrails_mode: str):
+def chat_with_ooproxy(model: str, base_url: str, use_openai: bool, enable_tools: bool, render_mode: str, guardrails_mode: str):
     global ATTACHMENT_BUFFER
 
     # Determine endpoint based on flag
@@ -2058,7 +2134,7 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
         print(f"🚀 Using OpenAI Compatible API at: {url}")
     else:
         url = f"{base_url}/api/chat"
-        print(f"🚀 Using Native Ollama API at: {url}")
+        print(f"🚀 Using native API at: {url}")
 
     messages: List[Dict] = load_context()
 
@@ -2250,7 +2326,7 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
                         active = " ← current" if s["id"] == CURRENT_SESSION_ID else ""
                         locked = " [in use]" if s["locked"] and s["id"] != CURRENT_SESSION_ID else ""
                         print(f"  {s['id']}  {m:<30}  {ts}  ({count} msgs){active}{locked}")
-                    print(f"\nResume with: ollama_chat <model> -r <session-id>")
+                    print(f"\nResume with: ooproxy_chat <model> -r <session-id>")
                 print()
                 continue
 
@@ -2259,7 +2335,7 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
                 print(f"🆔 Session ID: {CURRENT_SESSION_ID}")
                 print(f"🤖 Active Model: {model}")
                 print(f"🌐 API Endpoint: {base_url}")
-                print(f"🔌 API Mode: {'OpenAI Compatible' if use_openai else 'Native Ollama'}")
+                print(f"🔌 API Mode: {'OpenAI Compatible' if use_openai else 'native'}")
                 print(f"📂 Session Dir: {_session_dir(CURRENT_SESSION_ID)}")
 
                 # Calculate context size
@@ -2376,13 +2452,14 @@ def chat_with_ollama(model: str, base_url: str, use_openai: bool, enable_tools: 
         except Exception as e:
             print(f"\n❌ Error: {e}")
 
-def main():
+def main(argv: list[str] | None = None):
     _capture_launch_command_prefix()
-    parser = argparse.ArgumentParser(description="Chat with Ollama models via CLI.")
+    parser = argparse.ArgumentParser(description="Chat with models via CLI.")
+    parser.add_argument("--version", action="version", version=cli_version("ooproxy_chat"))
     parser.add_argument("model", help="The model name to use (e.g., llama3.2)")
     parser.add_argument("-o", "--openai", action="store_true", help="Use OpenAI compatible API endpoint")
-    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Hostname or IP address of the Ollama server (default: localhost)")
-    parser.add_argument("-P", "--port", default=DEFAULT_PORT, help="Port of the Ollama server (default: 11434)")
+    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help="Hostname or IP address of the server (default: localhost)")
+    parser.add_argument("-P", "--port", default=DEFAULT_PORT, help="Port of the server (default: 11434)")
     parser.add_argument("-r", "--resume", metavar="SESSION_ID", default=None,
                         help="Resume a specific session by ID (see /sessions inside chat)")
     parser.add_argument("--new", action="store_true",
@@ -2393,7 +2470,7 @@ def main():
     parser.add_argument("--no-tools", action="store_true", help="Disable local tool definitions for this session")
     parser.add_argument("--render-mode", choices=list(RENDER_MODES), default=DEFAULT_RENDER_MODE, help="How assistant replies are shown: buffered markdown view, live raw stream, or hybrid stream-then-markdown.")
     parser.add_argument("--guardrails", choices=["confirm-destructive", "read-only", "off"], default=DEFAULT_GUARDRAILS_MODE, help="How destructive tool calls are handled.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     configure_tool_registry(args.tools)
 
@@ -2420,7 +2497,7 @@ def main():
     acquire_pidfile()
     atexit.register(release_pidfile)
 
-    chat_with_ollama(
+    chat_with_ooproxy(
         args.model,
         base_url,
         args.openai,

@@ -8,9 +8,11 @@ These are pure pass-through — same format on both sides — so no translation 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -46,6 +48,12 @@ _TOOL_ERRORS = (
     "tool_choice",
     "tools",
     "function_call",
+)
+
+_AUTO_TOOL_CHOICE_ERRORS = (
+    "auto tool choice requires",
+    "enable-auto-tool-choice",
+    "tool-call-parser",
 )
 
 _STREAM_OPTIONS_ERRORS = (
@@ -103,8 +111,22 @@ def _strip_tools(body: dict) -> dict:
     return {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
 
 
+def _strip_auto_tool_choice(body: dict) -> dict:
+    tool_choice = body.get("tool_choice")
+    if tool_choice == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "auto":
+        return {k: v for k, v in body.items() if k != "tool_choice"}
+    return body
+
+
 def _strip_stream_options(body: dict) -> dict:
     return {k: v for k, v in body.items() if k != "stream_options"}
+
+
+def _is_auto_tool_choice_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in _AUTO_TOOL_CHOICE_ERRORS)
 
 
 def _should_disable_anthropic_tools(body: dict) -> bool:
@@ -202,6 +224,8 @@ def _apply_cached_flags(body: dict, flags: dict[str, bool]) -> dict:
     current = body
     if flags.get("strip_stream_options"):
         current = _strip_stream_options(current)
+    if flags.get("strip_tool_choice_auto"):
+        current = _strip_auto_tool_choice(current)
     if flags.get("strip_tools"):
         current = _strip_tools(current)
     if flags.get("normalize_messages"):
@@ -264,6 +288,7 @@ async def _open_stream_with_retries(
     )
     current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
+    stripped_auto_tool_choice = flags.get("strip_tool_choice_auto", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
     while True:
@@ -276,6 +301,12 @@ async def _open_stream_with_retries(
                 stripped_stream_options = True
                 if behavior:
                     await behavior.record(base_url, model, "strip_stream_options")
+            elif not stripped_auto_tool_choice and _is_auto_tool_choice_error(exc):
+                logger.info("v1 retrying without auto tool_choice for model=%s", model)
+                current = _strip_auto_tool_choice(current)
+                stripped_auto_tool_choice = True
+                if behavior:
+                    await behavior.record(base_url, model, "strip_tool_choice_auto")
             elif not stripped_tools and _is_tool_error(exc):
                 logger.info("v1 retrying without tools for model=%s", model)
                 current = _strip_tools(current)
@@ -303,6 +334,7 @@ async def _chat_with_retries(
     )
     current = _apply_cached_flags(_apply_profile_chat_defaults(body, endpoint_profile), flags)
     stripped_stream_options = flags.get("strip_stream_options", False)
+    stripped_auto_tool_choice = flags.get("strip_tool_choice_auto", False)
     stripped_tools = flags.get("strip_tools", False)
     normalized = flags.get("normalize_messages", False)
     while True:
@@ -315,6 +347,12 @@ async def _chat_with_retries(
                 stripped_stream_options = True
                 if behavior:
                     await behavior.record(base_url, model, "strip_stream_options")
+            elif not stripped_auto_tool_choice and _is_auto_tool_choice_error(exc):
+                logger.info("v1 retrying without auto tool_choice for model=%s", model)
+                current = _strip_auto_tool_choice(current)
+                stripped_auto_tool_choice = True
+                if behavior:
+                    await behavior.record(base_url, model, "strip_tool_choice_auto")
             elif not stripped_tools and _is_tool_error(exc):
                 logger.info("v1 retrying without tools for model=%s", model)
                 current = _strip_tools(current)
@@ -789,6 +827,8 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
     behavior = getattr(request.app.state, "behavior", None)
     base_url = getattr(request.app.state, "base_url", "")
     endpoint_profile = getattr(request.app.state, "endpoint_profile", None)
+    # Allow per-endpoint override of the TTFB timeout; fall back to module default
+    ttfb_timeout = _TTFB_TIMEOUT if (endpoint_profile is None or getattr(endpoint_profile, "ttfb_timeout", None) is None) else endpoint_profile.ttfb_timeout
     streaming = body.get("stream", False)
     model = body.get("model", "?")
 
@@ -833,7 +873,7 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
                     base_url=base_url,
                     endpoint_profile=endpoint_profile,
                 ),
-                timeout=_TTFB_TIMEOUT,
+                timeout=ttfb_timeout,
             )
         except asyncio.TimeoutError:
             # Server accepted the connection but never sent response headers — this
@@ -841,7 +881,7 @@ async def v1_chat_handler(request: Request) -> StreamingResponse | JSONResponse:
             # plain non-streaming request and wrap the reply in a synthetic stream.
             logger.warning(
                 "v1 TTFB timeout (>%.0fs) model=%s — falling back to non-streaming",
-                _TTFB_TIMEOUT, model,
+                ttfb_timeout, model,
             )
             fallback = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
             fallback["stream"] = False
@@ -1092,3 +1132,97 @@ async def v1_messages_handler(request: Request) -> StreamingResponse | JSONRespo
     if body.get("stream"):
         return StreamingResponse(_anthropic_synthetic_stream(anthropic_message), media_type="text/event-stream")
     return JSONResponse(anthropic_message)
+
+
+async def v1_messages_count_tokens_handler(request: Request) -> JSONResponse:
+    """POST /v1/messages/count_tokens — lightweight token counting for Anthropic-style messages.
+
+    Returns an approximate token count based on characters (1 token ≈ 4 chars).
+    This is intended to satisfy clients that call the endpoint for UI estimates.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    messages = body.get("messages", [])
+    model = body.get("model")
+
+    def _extract_text(content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    if "text" in item:
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(json.dumps(item, ensure_ascii=False))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        if isinstance(content, dict):
+            return str(content.get("text") or content.get("content") or json.dumps(content, ensure_ascii=False))
+        return str(content)
+
+    # Try tiktoken if available for accurate counts; otherwise fallback to heuristic
+    try:
+        tiktoken = importlib.import_module("tiktoken")
+        # Prefer model-specific encoder when possible, fall back to cl100k_base
+        try:
+            encoder = None
+            if model:
+                try:
+                    encoder = tiktoken.encoding_for_model(model)
+                except Exception:
+                    pass
+            if encoder is None:
+                try:
+                    encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception:
+                    # Last resort: use any available encoding
+                    encoder = tiktoken.get_encoding(next(iter(tiktoken._encoders)))
+        except Exception:
+            encoder = tiktoken.get_encoding("cl100k_base")
+
+        total_tokens = 0
+        for m in messages:
+            text = _extract_text(m.get("content") if isinstance(m, dict) else m)
+            total_tokens += len(encoder.encode(text))
+
+        prompt_tokens = int(total_tokens)
+        completion_tokens = 0
+        return JSONResponse({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated_with": "tiktoken",
+        })
+    except Exception:
+        # Heuristic fallback: combine char-based and word-based estimates with small buffer
+        total_chars = 0
+        total_words = 0
+        for m in messages:
+            text = _extract_text(m.get("content") if isinstance(m, dict) else m)
+            total_chars += len(text)
+            total_words += len(re.findall(r"\w+", text))
+
+        # heuristics: chars/4 and words*1.3, then add 3% buffer
+        import math
+
+        est_from_chars = total_chars / 4.0 if total_chars else 0.0
+        est_from_words = total_words * 1.3 if total_words else 0.0
+        prompt_tokens = int(math.ceil(max(est_from_chars, est_from_words) * 1.03))
+        completion_tokens = 0
+        total_tokens = prompt_tokens + completion_tokens
+        return JSONResponse({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "estimated_with": "heuristic",
+        })

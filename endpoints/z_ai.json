@@ -1,12 +1,13 @@
 {
-  "id": "nvidia_nim",
+  "id": "z_ai",
   "match": {
     "schemes": ["https"],
-    "host_equals": ["integrate.api.nvidia.com", "ai.api.nvidia.com"],
+    "host_equals": ["api.z.ai"],
     "ports": [443],
-    "path_prefixes": ["/v1", "/"]
+    "path_prefixes": ["/api/coding/paas/v4/"]
   },
   "models": {
+    "method": "GET",
     "path": "models",
     "format": "openai"
   },
@@ -16,14 +17,8 @@
   "chat": {
     "path": "chat/completions",
     "streaming": "sse",
-    "tools": "trial",
+    "tools": "supported",
     "system_prompt": "supported",
-    "ttfb_timeout": 90,
-    "timeouts": {
-      "read": 300
-    }
-  },
-  "behavior": {
-    "strip_tool_choice_auto": true
+    "ttfb_timeout": 90
   }
 }

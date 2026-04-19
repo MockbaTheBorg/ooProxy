@@ -8,15 +8,60 @@ import logging
 import random
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
 import httpx
+
+# Optional Prometheus metrics: use if available, otherwise fall back to in-process counters
+_PROMETHEUS_AVAILABLE = True
+try:
+    from prometheus_client import Counter as _PromCounter  # type: ignore
+except Exception:  # ImportError or if package missing
+    _PROMETHEUS_AVAILABLE = False
+    _PromCounter = None  # type: ignore
 
 from modules._server.config import ProxyConfig
 from modules._server.endpoint_profiles import EndpointProfile, resolve_endpoint_profile
 
 logger = logging.getLogger("ooproxy")
+
+# In-process metrics (fallback when Prometheus client is not installed).
+_metrics: dict[str, int] = {
+    "upstream_429_total": 0,
+    "upstream_retry_after_used_total": 0,
+}
+
+# Prometheus counters (created only if prometheus_client is available)
+if _PROMETHEUS_AVAILABLE and _PromCounter is not None:
+    _PROM_UPSTREAM_429 = _PromCounter("ooproxy_upstream_429_total", "Upstream 429 responses")
+    _PROM_RETRY_AFTER_USED = _PromCounter("ooproxy_upstream_retry_after_used_total", "Upstream Retry-After header used")
+else:
+    _PROM_UPSTREAM_429 = None
+    _PROM_RETRY_AFTER_USED = None
+
+
+def _inc_429() -> None:
+    try:
+        if _PROM_UPSTREAM_429 is not None:
+            _PROM_UPSTREAM_429.inc()
+    finally:
+        _metrics["upstream_429_total"] += 1
+
+
+def _inc_retry_after_used() -> None:
+    try:
+        if _PROM_RETRY_AFTER_USED is not None:
+            _PROM_RETRY_AFTER_USED.inc()
+    finally:
+        _metrics["upstream_retry_after_used_total"] += 1
+
+
+def get_metrics() -> dict:
+    """Return a copy of in-process metrics counters."""
+    return dict(_metrics)
 
 # ---------------------------------------------------------------------------
 # Timeouts
@@ -52,11 +97,27 @@ def _backoff_delay(attempt: int, response: httpx.Response | None = None) -> floa
     Otherwise uses exponential back-off with ±10 % jitter.
     """
     if response is not None:
-        after = response.headers.get("Retry-After", "")
-        try:
-            return max(0.0, float(after))
-        except ValueError:
-            pass
+        after = response.headers.get("Retry-After", "").strip()
+        if after:
+            # Retry-After can be either a number of seconds or an HTTP-date.
+            # Try numeric seconds first, then parse an HTTP-date per RFC.
+            try:
+                delay = max(0.0, float(after))
+                _inc_retry_after_used()
+                return delay
+            except ValueError:
+                try:
+                    dt = parsedate_to_datetime(after)
+                    if dt is None:
+                        raise ValueError("unable to parse Retry-After HTTP-date")
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    delay = dt.timestamp() - time.time()
+                    _inc_retry_after_used()
+                    return max(0.0, delay)
+                except Exception:
+                    # Fall through to default backoff if parsing fails
+                    pass
     base = RETRY_BASE_DELAY * (2 ** attempt)
     jitter = base * 0.1 * (2 * random.random() - 1)
     return base + jitter
@@ -162,6 +223,127 @@ def _normalize_ollama_tags_payload(data: dict) -> dict:
     return {"object": "list", "data": items}
 
 
+def _parse_iso_timestamp(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return int(datetime.fromisoformat(text).timestamp())
+    except ValueError:
+        return None
+
+
+def _path_text(entry: object, path: str) -> str:
+    value = _extract_json_path(entry, path)
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def _path_timestamp(entry: object, path: str) -> int | None:
+    value = _extract_json_path(entry, path)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return _parse_iso_timestamp(value)
+
+
+def _path_value(entry: object, path: str) -> object:
+    return _extract_json_path(entry, path)
+
+
+def _normalize_profile_object_list_payload(data: dict, profile: EndpointProfile) -> dict:
+    items_path = profile.models_items_path or "items"
+    raw_items = _extract_json_path(data, items_path)
+    if not isinstance(raw_items, list):
+        raise TypeError(f"Unsupported model-list payload at {items_path!r}: {type(raw_items).__name__}")
+
+    items = []
+    id_path = profile.models_fields.get("id", "")
+    created_path = profile.models_fields.get("created", "")
+    modified_at_path = profile.models_fields.get("modified_at", "")
+    context_length_path = profile.models_fields.get("context_length", "")
+    parent_model_path = profile.models_fields.get("parent_model", "")
+
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        model_id = _path_text(entry, id_path)
+        if not model_id:
+            continue
+
+        capabilities: list[str] = []
+        capability_cfg = profile.models_capabilities or {}
+        embedding_when = capability_cfg.get("embedding_when")
+        if isinstance(embedding_when, dict):
+            kind_value = _path_text(entry, str(embedding_when.get("path") or ""))
+            expected_value = str(embedding_when.get("equals") or "")
+            if kind_value and kind_value == expected_value:
+                capabilities.append("embedding")
+
+        completion_when = capability_cfg.get("completion_when_any_present")
+        if not capabilities and isinstance(completion_when, list):
+            if any(_path_value(entry, str(path)) not in (None, "", [], {}) for path in completion_when):
+                capabilities.append("completion")
+
+        tools_when = capability_cfg.get("tools_when_truthy")
+        if isinstance(tools_when, str) and bool(_path_value(entry, tools_when)):
+            if "completion" not in capabilities:
+                capabilities.append("completion")
+            capabilities.append("tools")
+
+        if not capabilities and capability_cfg.get("default_embedding"):
+            capabilities.append("embedding")
+
+        normalized = {
+            "id": model_id,
+            "object": "model",
+        }
+        created = _path_timestamp(entry, created_path) if created_path else None
+        if created is not None:
+            normalized["created"] = created
+        if profile.models_owned_by:
+            normalized["owned_by"] = profile.models_owned_by
+        optional_fields = {
+            "modified_at": _path_value(entry, modified_at_path) if modified_at_path else None,
+            "context_length": _path_value(entry, context_length_path) if context_length_path else None,
+            "capabilities": capabilities,
+            "parent_model": _path_value(entry, parent_model_path) if parent_model_path else None,
+        }
+        for key, value in optional_fields.items():
+            if value not in (None, "", []):
+                normalized[key] = value
+        items.append(normalized)
+    return {"object": "list", "data": items}
+
+
+def _extract_json_path(data: object, path: str) -> object | None:
+    current = data
+    if not path.strip():
+        return current
+    for segment in path.split("."):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if isinstance(current, dict):
+            if segment not in current:
+                return None
+            current = current[segment]
+            continue
+        if isinstance(current, list):
+            try:
+                index = int(segment)
+            except ValueError:
+                return None
+            if index < 0 or index >= len(current):
+                return None
+            current = current[index]
+            continue
+        return None
+    return current
+
+
 def _normalize_models_payload(data: object, profile: EndpointProfile | None = None) -> dict:
     profile_format = (profile.models_format if profile else "").strip().lower()
 
@@ -173,6 +355,9 @@ def _normalize_models_payload(data: object, profile: EndpointProfile | None = No
 
     if profile_format == "ollama_tags" and isinstance(data, dict):
         return _normalize_ollama_tags_payload(data)
+
+    if profile_format == "object_list" and isinstance(data, dict) and profile is not None:
+        return _normalize_profile_object_list_payload(data, profile)
 
     if profile_format == "array" and isinstance(data, list):
         return {"object": "list", "data": [_normalize_model_entry(entry) for entry in data if isinstance(entry, dict)]}
@@ -219,12 +404,68 @@ class OpenAIClient:
         self._headers: dict[str, str] = (
             {"Authorization": f"Bearer {config.key}"} if config.key else {}
         )
-        self._client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
-        if self.endpoint_profile is not None:
-            logger.info("endpoint profile: using %s for %s", self.endpoint_profile.id, self._base)
+        # Allow per-endpoint override of default httpx timeouts
+        if self.endpoint_profile is None:
+            timeout = _TIMEOUT
+            logger.debug("no endpoint profile: using global timeouts %s", timeout)
+        else:
+            connect = self.endpoint_profile.timeout_connect if getattr(self.endpoint_profile, "timeout_connect", None) is not None else 10.0
+            read = self.endpoint_profile.timeout_read if getattr(self.endpoint_profile, "timeout_read", None) is not None else 180.0
+            write = self.endpoint_profile.timeout_write if getattr(self.endpoint_profile, "timeout_write", None) is not None else 30.0
+            pool = self.endpoint_profile.timeout_pool if getattr(self.endpoint_profile, "timeout_pool", None) is not None else 10.0
+            timeout = httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+            logger.info(
+                "endpoint profile: using %s for %s — timeouts(connect=%.0fs read=%.0fs write=%.0fs pool=%.0f)",
+                self.endpoint_profile.id,
+                self._base,
+                connect,
+                read,
+                write,
+                pool,
+            )
+        self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
     def _url_for_path(self, path: str) -> str:
         return urljoin(f"{self._base.rstrip('/')}/", path)
+
+    async def _request_json(self, method: str, path: str) -> object:
+        headers = {**self._headers, "Accept": "application/json"}
+        t0 = time.perf_counter()
+        response = await self._client.request(method, self._url_for_path(path), headers=headers, follow_redirects=False)
+        latency_ms = (time.perf_counter() - t0) * 1000
+        if 300 <= response.status_code < 400:
+            _decode_json_response(response, path=path)
+        response.raise_for_status()
+        logger.debug("upstream %s %s ← %.0fms", method.upper(), path, latency_ms)
+        return _decode_json_response(response, path=path)
+
+    async def _resolve_models_variables(self) -> dict[str, str]:
+        profile = self.endpoint_profile
+        if profile is None or not profile.models_variables:
+            return {}
+
+        resolved: dict[str, str] = {}
+        for name, config in profile.models_variables.items():
+            method = str(config.get("method") or "GET").upper()
+            path = str(config.get("path") or "").strip()
+            json_path = str(config.get("json_path") or "").strip()
+            strip_prefix = str(config.get("strip_prefix") or "")
+            if not path:
+                raise RuntimeError(f"endpoint profile variable {name!r} is missing a path")
+
+            payload = await self._request_json(method, path)
+            raw_value = _extract_json_path(payload, json_path)
+            if raw_value is None:
+                raise RuntimeError(f"upstream {path} did not provide {name!r} at {json_path!r}")
+
+            value = str(raw_value).strip()
+            if strip_prefix and value.startswith(strip_prefix):
+                value = value[len(strip_prefix):]
+            if not value:
+                raise RuntimeError(f"upstream {path} returned an empty value for {name!r}")
+            resolved[name] = value
+
+        return resolved
 
     async def probe_ready(self) -> tuple[bool, str | None]:
         profile = self.endpoint_profile
@@ -279,9 +520,11 @@ class OpenAIClient:
                 latency_ms = (time.perf_counter() - t0) * 1000
                 last_exc = exc
                 if attempt < RETRY_MAX and exc.response.status_code in _RETRY_ON_STATUS:
+                    if exc.response.status_code == 429:
+                        _inc_429()
                     delay = _backoff_delay(attempt, exc.response)
                     logger.warning(
-                        "upstream POST %s status=%d attempt=%d/%.0fs → retry in %.1fs",
+                        "upstream POST %s status=%d attempt=%d/%.0fms → retry in %.1fs",
                         path, exc.response.status_code, attempt + 1, latency_ms, delay,
                     )
                     await asyncio.sleep(delay)
@@ -333,6 +576,8 @@ class OpenAIClient:
                 latency_ms = (time.perf_counter() - t0) * 1000
                 last_exc = exc
                 if attempt < RETRY_MAX and exc.response.status_code in _RETRY_ON_STATUS:
+                    if exc.response.status_code == 429:
+                        _inc_429()
                     delay = _backoff_delay(attempt, exc.response)
                     logger.warning(
                         "upstream stream %s status=%d attempt=%d/%.0fms → retry in %.1fs",
@@ -361,17 +606,12 @@ class OpenAIClient:
 
     async def get_models(self) -> dict:
         """GET the upstream model-list endpoint and normalize it to OpenAI format."""
+        method = self.endpoint_profile.models_method if self.endpoint_profile else "GET"
         path = self.endpoint_profile.models_path if self.endpoint_profile else "models"
-        url = self._url_for_path(path)
-        headers = {**self._headers, "Accept": "application/json"}
-        t0 = time.perf_counter()
-        r = await self._client.get(url, headers=headers, follow_redirects=False)
-        latency_ms = (time.perf_counter() - t0) * 1000
-        if 300 <= r.status_code < 400:
-            _decode_json_response(r, path=path)
-        r.raise_for_status()
-        logger.debug("upstream GET %s ← %.0fms", path, latency_ms)
-        payload = _decode_json_response(r, path=path)
+        if self.endpoint_profile and self.endpoint_profile.models_variables:
+            path = path.format(**(await self._resolve_models_variables()))
+
+        payload = await self._request_json(method, path)
         return _normalize_models_payload(_strip_vendor(payload), self.endpoint_profile)
 
     async def chat(self, body: dict) -> dict:

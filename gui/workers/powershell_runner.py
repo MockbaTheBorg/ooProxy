@@ -4,11 +4,16 @@ Used for:
 - DPAPI key encryption / decryption
 - Scheduled Task install / uninstall
 - Any one-shot PowerShell invocations
+
+Security: All commands are passed via ``-EncodedCommand`` (Base64)
+to prevent OS Command Injection (CWE-78).
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
+
+from gui.security import encode_ps_command
 
 
 class PowerShellRunner(QObject):
@@ -26,15 +31,19 @@ class PowerShellRunner(QObject):
         self._stderr_buf: list[str] = []
 
     def run_command(self, command: str) -> None:
-        """Execute a PowerShell command string.
+        """Execute a PowerShell command string safely.
+
+        The command is Base64-encoded (UTF-16LE) and passed via
+        ``-EncodedCommand`` to prevent metacharacter injection.
 
         Example::
 
             runner.run_command("ConvertTo-SecureString 'xxx' | ...")
         """
+        encoded = encode_ps_command(command)
         self._run(
             "powershell.exe",
-            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
         )
 
     def run_script(self, script_path: str, args: list[str] | None = None) -> None:

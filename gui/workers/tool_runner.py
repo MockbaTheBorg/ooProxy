@@ -61,24 +61,26 @@ class ToolRunner(QObject):
     def run_external(script_path: str, args: list[str] | None = None) -> None:
         """Launch the tool in an external terminal (for interactive TUIs).
 
-        On Windows, opens a new ``cmd.exe`` window.
+        On Windows, opens a new console window using CREATE_NEW_CONSOLE
+        to avoid shell interpretation of arguments (CWE-78).
         """
         python = get_python_path()
         cmd_parts = [python, script_path]
         if args:
             cmd_parts.extend(args)
 
+        working_dir = str(Path(script_path).resolve().parents[1])
+
         if sys.platform == "win32":
-            # Use 'start' to open a new console window
-            cmd_str = " ".join(f'"{p}"' for p in cmd_parts)
+            # Safe: no shell interpretation, new console window
             subprocess.Popen(
-                f'start "ooProxy Tool" cmd /k {cmd_str}',
-                shell=True,
-                cwd=str(Path(script_path).resolve().parents[1]),
+                cmd_parts,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                cwd=working_dir,
             )
         else:
             # Fallback for non-Windows (e.g. xterm)
-            subprocess.Popen(cmd_parts, cwd=str(Path(script_path).resolve().parents[1]))
+            subprocess.Popen(cmd_parts, cwd=working_dir)
 
     def is_running(self) -> bool:
         if self._process is None:

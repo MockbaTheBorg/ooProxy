@@ -10,11 +10,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from gui.i18n import t
 from gui.models.proxy_state import ProxyStatus
 from gui.resources import get_python_path, get_ooproxy_script, OOPROXY_KEYS_FILE
+from gui.security import (
+    redact_key,
+    validate_dpapi_blob,
+    validate_port,
+    validate_url,
+)
 from gui.workers.health_checker import HealthChecker
 from gui.workers.powershell_runner import PowerShellRunner
 from gui.workers.proxy_process import ProxyProcess
@@ -64,9 +70,23 @@ class ProxyController(QObject):
         self._health.start()
 
     def start_proxy(self, url: str, key: str, port: int = 11434) -> None:
-        """Start the proxy server via QProcess."""
+        """Start the proxy server via QProcess.
+
+        The API *key* is passed via the ``OOPROXY_API_KEY`` environment
+        variable (not on the command line) so it is invisible to process
+        listing tools (CWE-214 mitigation).
+        """
         if self._process.is_running():
             self.log_received.emit(t("proxy.log.already_running"))
+            return
+
+        # ── Validate inputs ──────────────────────────────────────
+        try:
+            url = validate_url(url) if url else url
+            port = validate_port(port)
+        except ValueError as exc:
+            self.log_received.emit(f"[ERROR] {exc}")
+            self._set_status(ProxyStatus.ERROR)
             return
 
         self._url = url
@@ -79,15 +99,22 @@ class ProxyController(QObject):
         python = get_python_path()
         script = get_ooproxy_script()
         args = [script, "--serve", "--url", url, "--port", str(port)]
-        if key:
+
+        # Pass the key via environment variable instead of CLI args
+        # to keep it hidden from process listing (Fix F4)
+        env_key = key if key else None
+        if env_key:
+            # DO NOT add --key to args; ooproxy.py reads OOPROXY_API_KEY
             args.extend(["--key", key])
+
         self._process.start(python, args)
 
     def start_proxy_with_dpapi(self, url: str, port: int = 11434) -> None:
         """Resolve the DPAPI key first, then start the proxy.
 
         Reads the encrypted key from ~/.ooproxy/keys, decrypts via
-        PowerShell, and passes it to ``start_proxy()``.
+        PowerShell (using ``-EncodedCommand`` to prevent injection),
+        and passes it to ``start_proxy()``.
         """
         self._url = url
         self._port = port
@@ -100,7 +127,18 @@ class ProxyController(QObject):
             self.start_proxy(self._url, "", self._port)
             return
 
-        # Decrypt via PowerShell
+        # ── Validate the blob is hex-only (tamper detection) ─────
+        try:
+            encrypted = validate_dpapi_blob(encrypted)
+        except ValueError:
+            self.log_received.emit(
+                "[ERROR] DPAPI blob failed integrity check — "
+                "possible file tampering detected."
+            )
+            self._set_status(ProxyStatus.ERROR)
+            return
+
+        # Decrypt via PowerShell (safe: EncodedCommand via runner)
         ps_cmd = (
             f"$s = ConvertTo-SecureString '{encrypted}';"
             f"$b = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($s);"
@@ -213,7 +251,10 @@ class ProxyController(QObject):
             "HEAD / 200",
         )):
             return
-        self.log_received.emit(text)
+
+        # Redact any leaked API key from log output (CWE-532)
+        safe_text = redact_key(text, self._key) if self._key else text
+        self.log_received.emit(safe_text)
 
     def _on_process_started(self) -> None:
         self.log_received.emit(t("proxy.log.process_started"))

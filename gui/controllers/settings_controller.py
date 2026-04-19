@@ -13,6 +13,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from gui.i18n import t
 from gui.models.app_settings import AppSettings, KeyEntry, KNOWN_BACKENDS
 from gui.resources import OOPROXY_DIR, OOPROXY_KEYS_FILE
+from gui.security import validate_endpoint, validate_url
 from gui.workers.powershell_runner import PowerShellRunner
 
 
@@ -69,6 +70,11 @@ class SettingsController(QObject):
 
     def save_backend_url(self, url: str) -> None:
         """Update the backend URL in settings."""
+        try:
+            url = validate_url(url)
+        except ValueError as exc:
+            self.message.emit(f"[ERROR] {exc}")
+            return
         self._settings.backend_url = url.rstrip("/")
         self._persist_keys()
         self.message.emit(t("settings.url_updated", url=url))
@@ -92,7 +98,16 @@ class SettingsController(QObject):
             self.key_saved.emit(False, t("settings.key_required"))
             return
 
-        # Escape single quotes for PowerShell
+        # Validate endpoint format (blocks shell metacharacters)
+        try:
+            endpoint = validate_endpoint(endpoint)
+        except ValueError as exc:
+            self.key_saved.emit(False, f"[ERROR] {exc}")
+            return
+
+        # Escape single quotes for PowerShell string literal.
+        # Note: the command is also Base64-encoded by PowerShellRunner
+        # (EncodedCommand), so metacharacters cannot escape regardless.
         escaped = plain_key.replace("'", "''")
 
         ps_cmd = (

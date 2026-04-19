@@ -1,0 +1,122 @@
+{
+  "app": {
+    "name": "ooProxy Manager",
+    "version": "1.0.0"
+  },
+  "tabs": {
+    "proxy": "⚡  Proxy",
+    "settings": "⚙  Settings",
+    "tools": "🔧  Tools",
+    "help": "❓  Help"
+  },
+  "proxy": {
+    "status_group": "Proxy Status",
+    "checking": "Checking…",
+    "backend": "Backend: {url}",
+    "backend_empty": "Backend: —",
+    "local": "Local: http://127.0.0.1:{port}",
+    "btn_start": "▶  Start Proxy",
+    "btn_stop": "■  Stop Proxy",
+    "btn_autostart": "⏻  Auto-Start",
+    "btn_autostart_remove": "⏻  Remove Auto-Start",
+    "log_console": "Log Console",
+    "btn_export": "📥  Export",
+    "btn_export_tooltip": "Save logs to file",
+    "btn_clear": "🗑  Clear",
+    "btn_clear_tooltip": "Clear log console",
+    "log_placeholder": "Proxy logs will appear here…",
+    "export_dialog_title": "Export Logs",
+    "export_ok": "[OK] Logs exported to: {path}",
+    "export_error": "[ERROR] Failed to export: {error}",
+    "status": {
+      "unknown": "Unknown",
+      "checking": "Checking…",
+      "stopped": "Stopped",
+      "starting": "Starting…",
+      "running": "Running",
+      "stopping": "Stopping…",
+      "error": "Error"
+    },
+    "log": {
+      "already_running": "[WARN] Proxy is already running.",
+      "starting": "Starting proxy → {url} (port {port})",
+      "resolving_dpapi": "Resolving DPAPI key…",
+      "dpapi_not_found": "[INFO] DPAPI key not found. Starting proxy (fallback via keys.json enabled)...",
+      "dpapi_error": "[ERROR] Failed to decrypt DPAPI key: {error}",
+      "stopping": "Stopping proxy…",
+      "process_started": "Proxy process started.",
+      "process_crashed": "[ERROR] Proxy terminated (code={code}, status={status})",
+      "process_stopped": "Proxy terminated normally.",
+      "health_ok": "Health-check: proxy is responding ✓",
+      "health_down": "Health-check: proxy stopped responding.",
+      "registering_autostart": "Registering auto-start on Windows…",
+      "autostart_ok": "[OK] Auto-start registered.",
+      "autostart_error": "[ERROR] {error}",
+      "removing_autostart": "Removing auto-start…",
+      "autostart_removed": "[OK] Auto-start removed."
+    }
+  },
+  "settings": {
+    "backend_group": "Backend Configuration",
+    "preset": "Preset:",
+    "preset_custom": "— Custom —",
+    "url_label": "Base URL:",
+    "url_placeholder": "https://integrate.api.nvidia.com/v1",
+    "port_label": "Local Port:",
+    "btn_save": "Save Configuration",
+    "keys_group": "API Keys (DPAPI)",
+    "endpoint_placeholder": "Endpoint (e.g., integrate.api.nvidia.com)",
+    "key_placeholder": "API Key",
+    "btn_add_key": "+ Add",
+    "table_endpoint": "Endpoint",
+    "table_status": "Status",
+    "table_actions": "Actions",
+    "key_status_dpapi": "🔒 DPAPI",
+    "btn_delete_key": "🗑 Remove",
+    "confirm_delete_title": "Confirm Removal",
+    "confirm_delete_msg": "Remove the key for '{endpoint}'?",
+    "config_saved": "Configuration saved ✓",
+    "url_updated": "URL updated: {url}",
+    "port_updated": "Port updated: {port}",
+    "key_required": "Endpoint and key are required.",
+    "key_saved": "Key for {endpoint} saved with DPAPI.",
+    "key_encrypt_error": "Failed to encrypt: {error}",
+    "key_deleted": "Key for {endpoint} removed.",
+    "key_not_found": "Key for {endpoint} not found.",
+    "load_error": "Failed to load settings: {error}",
+    "migrating_keys": "Migrating legacy keys to DPAPI...",
+    "migrate_error": "Warning: Error reading legacy keys ({error})"
+  },
+  "tools": {
+    "title": "Available Tools",
+    "btn_refresh": "↻  Refresh",
+    "output_title": "Tool Output",
+    "btn_cancel": "Cancel",
+    "output_placeholder": "Click a tool to run it…",
+    "badge_terminal": "Terminal ↗",
+    "no_description": "No description",
+    "empty": "No tools found in tools/",
+    "running": "▶ Running {name}…",
+    "finished": "─── {name} finished: {status} ───",
+    "finished_ok": "OK",
+    "finished_error": "ERROR (code={code})",
+    "already_running": "Another tool is already running.",
+    "error_prefix": "[ERROR] {error}"
+  },
+  "help": {
+    "title": "Documentation & Help",
+    "readme_missing": "README.md not found in the project directory."
+  },
+  "tray": {
+    "show_hide": "Show / Hide",
+    "stop_proxy": "Stop Proxy",
+    "quit": "Quit",
+    "minimized_title": "ooProxy Manager",
+    "minimized_msg": "The proxy continues running in the system tray."
+  },
+  "statusbar": {
+    "initializing": "Initializing…",
+    "proxy_status": "Proxy: {status}",
+    "footer": "ooProxy Manager  •  localhost:{port}"
+  }
+}

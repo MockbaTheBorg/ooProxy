@@ -32,6 +32,7 @@ ooProxy listens on `localhost:11434` and exposes the full Ollama API surface (`/
 
 ```
 pip install -r requirements.txt
+pip install -r requirements-gui.txt # Optional, for the GUI
 ```
 
 ---
@@ -44,7 +45,25 @@ cd ooProxy
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-gui.txt
 ```
+
+---
+
+## Graphical User Interface (GUI)
+
+ooProxy includes a fully-featured, standalone Graphical User Interface. It allows you to manage the proxy server, configure remote API keys, and run built-in tools without touching the command line.
+
+- **Non-blocking Execution:** Built with an MVC architecture, the interface remains responsive by utilizing asynchronous background workers for the proxy server, health checks, and tool execution.
+- **Localization (i18n):** The GUI supports internationalization, currently shipping with English (en-US) and Portuguese (pt-BR) language options via a selector in the Settings tab.
+- **Security Hardened:** The backed is secured via dedicated parameter sanitization and strict validation, explicitly preventing arbitrary command injection when launching background processes or PowerShell runners.
+
+To start the GUI:
+
+```bash
+python -m gui.main
+```
+*(On Windows, run `pythonw -m gui.main` to launch without keeping a command prompt window open).*
 
 ---
 
@@ -303,6 +322,14 @@ modules/
     config.py           # ProxyConfig (URL, key, port)
     handlers/           # Route handlers for each Ollama endpoint
     translate/          # Ollama ↔ OpenAI request/response translation
+gui/                    # Graphical User Interface
+  main.py               # Entry point for the GUI
+  controllers/          # MVC Controllers (business logic and input handling)
+  models/               # MVC Models (state representation)
+  tabs/                 # View components (interface layouts)
+  workers/              # Asynchronous background threads (proxy, tools, health)
+  locales/              # JSON translation files (e.g., pt_BR.json)
+  security.py           # Command sanitization and injection prevention
 ```
 
 ---

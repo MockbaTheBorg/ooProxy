@@ -128,11 +128,25 @@ def _backoff_delay(attempt: int, response: httpx.Response | None = None) -> floa
 # ---------------------------------------------------------------------------
 
 def _log_body(direction: str, body: dict) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
-        return
-    raw = json.dumps(body, ensure_ascii=False)
+    # Prepare a compact preview of the JSON body
+    try:
+        raw = json.dumps(body, ensure_ascii=False)
+    except Exception:
+        # Fallback to string conversion if JSON serialization fails
+        raw = str(body)
     preview = raw[:600] + ("…" if len(raw) > 600 else "")
-    logger.debug("upstream %s %s", direction, preview)
+
+    # In DEBUG mode keep the original verbose debug output
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("upstream %s %s", direction, preview)
+        return
+
+    # In INFO (verbose) mode show concise, user-friendly messages
+    if logger.isEnabledFor(logging.INFO):
+        if direction == "→":
+            logger.info("prompt sent: %s", preview)
+        else:
+            logger.info("answer received: %s", preview)
 
 
 def _preview_text(text: str, limit: int = 600) -> str:
@@ -430,14 +444,25 @@ class OpenAIClient:
 
     async def _request_json(self, method: str, path: str) -> object:
         headers = {**self._headers, "Accept": "application/json"}
+        # Log concise request info when running in verbose (INFO) mode
+        if logger.isEnabledFor(logging.INFO) and not logger.isEnabledFor(logging.DEBUG):
+            logger.info("request sent: %s %s", method.upper(), path)
+
         t0 = time.perf_counter()
         response = await self._client.request(method, self._url_for_path(path), headers=headers, follow_redirects=False)
         latency_ms = (time.perf_counter() - t0) * 1000
         if 300 <= response.status_code < 400:
             _decode_json_response(response, path=path)
         response.raise_for_status()
+        payload = _decode_json_response(response, path=path)
         logger.debug("upstream %s %s ← %.0fms", method.upper(), path, latency_ms)
-        return _decode_json_response(response, path=path)
+        # Log the returned payload in verbose mode (INFO) as a short 'answer received'
+        try:
+            _log_body("←", _strip_vendor(payload) if isinstance(payload, dict) else payload)
+        except Exception:
+            # Don't let logging interfere with normal operation
+            logger.debug("failed to log upstream payload for %s %s", method.upper(), path)
+        return payload
 
     async def _resolve_models_variables(self) -> dict[str, str]:
         profile = self.endpoint_profile

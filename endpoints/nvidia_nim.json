@@ -18,9 +18,9 @@
     "streaming": "sse",
     "tools": "trial",
     "system_prompt": "supported",
-    "ttfb_timeout": 90,
+    "ttfb_timeout": 180,
     "timeouts": {
-      "read": 300
+      "read": 3600
     }
   },
   "behavior": {
